@@ -70,6 +70,14 @@ there says how a chat battle runs:
 Adding a game = a new repo made the same way, its entry in the registry, and
 (for chat battles) the `--battle` or `--host/--join` flags in the game.
 
+## The games host (BM Beheer)
+
+`deploy/games-host` is the SSH container where beheer runs every player's
+chat battle in tmux. Its init installs this library and every game; beheer
+reads `games --list --json` there for the slash commands and start commands.
+A new game in the registry shows up in beheer after the games host restarts
+(the init then installs it).
+
 ## Development
 
 ```sh

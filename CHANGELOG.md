@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.0 (2026-11-09)
+- The games host of BM Beheer lives here now (`deploy/games-host`): it installs the library and every game, and beheer reads the list of games from it.
+
 ## v1.0.0 (2026-11-09)
 - One library for all terminal games: a retro shelf of cartridges with each game's version, update and your stats.
 - Enter plays a game in the same terminal; quitting it brings you back to the shelf.

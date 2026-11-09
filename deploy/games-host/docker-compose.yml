@@ -1,0 +1,30 @@
+# Games-host voor BM Beheer chat-battles (elke game uit de registry van de games-bibliotheek).
+#
+# Een geisoleerd sshd-containertje waar beheer's web-terminal per speler een
+# sessie opent die het echte spel in tmux draait (overleeft reconnects en
+# beheer-updates). Er staat bewust NIETS anders op: geen secrets, geen
+# netwerktoegang nodig behalve uitgaand (git/pip/relay).
+#
+# Beheer .env verwacht: GAMES_SSH_HOST=host.docker.internal, GAMES_SSH_PORT=5722,
+# GAMES_SSH_USER=player, GAMES_SSH_PASSWORD=<zelfde als hieronder>.
+# De poort luistert alleen op de docker-gateway van beheer (192.168.128.1), niet
+# op LAN/tailnet: alleen beheer hoeft erbij.
+services:
+  games-host:
+    image: linuxserver/openssh-server:latest
+    container_name: games-host
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Amsterdam
+      - PASSWORD_ACCESS=true
+      - USER_NAME=player
+      - USER_PASSWORD=${GAMES_SSH_PASSWORD:?zet GAMES_SSH_PASSWORD in .env}
+    ports:
+      - "192.168.128.1:5722:2222"
+    volumes:
+      - ./init:/custom-cont-init.d:ro
+      - games_config:/config
+volumes:
+  games_config:

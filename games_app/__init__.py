@@ -1,3 +1,3 @@
 """Games: one library for all terminal games."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
