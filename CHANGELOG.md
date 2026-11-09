@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.1 (2026-11-09)
+- `.env` files are ignored by git, so the games host password can never end up in the repo.
+
 ## v1.1.0 (2026-11-09)
 - The games host of BM Beheer lives here now (`deploy/games-host`): it installs the library and every game, and beheer reads the list of games from it.
 
