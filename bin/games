@@ -1,0 +1,12 @@
+#!/bin/sh
+# Games launcher: runs the app from the ~/.games checkout.
+# POSIX sh on purpose: iSH/Alpine have no bash by default.
+APP_DIR="${GAMES_HOME:-$HOME/.games}"
+
+if [ ! -x "$APP_DIR/.venv/bin/python" ]; then
+    echo "Games is not installed correctly. Reinstall with:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/RaphaelA4U/games/main/install.sh | sh"
+    exit 1
+fi
+
+exec "$APP_DIR/.venv/bin/python" -m games_app "$@"

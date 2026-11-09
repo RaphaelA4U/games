@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "games-tui"
+version = "1.0.0"
+description = "All terminal games in one retro library: yahtzee, solitaire, sudoku and more"
+requires-python = ">=3.9"
+dependencies = [
+    "textual>=8.2,<9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+games = "games_app.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["games_app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+games_app = ["registry.json"]

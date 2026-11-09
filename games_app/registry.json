@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "yahtzee",
+      "name": "Yahtzee",
+      "package": "yahtzee_app",
+      "repo": "https://github.com/RaphaelA4U/yahtzee",
+      "tagline": "Dice against bots or friends, online.",
+      "description": "Five dice, thirteen boxes. Play against bots of four levels or online with friends, with a coach that grades every move and a review afterwards.",
+      "players": "1-6",
+      "cover": [".---. .---.", "| o | |o o|", "'---' '---'"],
+      "stats": {"list": "games_v2", "best": "your_score", "best_label": "best score"},
+      "battle": {
+        "type": "match",
+        "command": "$HOME/.local/bin/yahtzee --profile u{uid} --name {name} --color '{color}'{expect}{autostart} {flag} {code}"
+      }
+    },
+    {
+      "id": "solitaire",
+      "name": "Solitaire",
+      "package": "solitaire_app",
+      "repo": "https://github.com/RaphaelA4U/solitaire",
+      "tagline": "Klondike with winnable deals only.",
+      "description": "Klondike solitaire with drag and drop, hints, unlimited undo and only deals a solver has proven winnable. The review shows the move where a deal was lost.",
+      "players": "1, race in beheer",
+      "cover": ["+--+--+--+", "|A♥|K♠|Q♦|", "+--+--+--+"],
+      "stats": {"list": "games", "best": "time", "best_label": "fastest win"},
+      "battle": {
+        "type": "race",
+        "command": "$HOME/.local/bin/solitaire --profile u{uid} --battle {gid}",
+        "progress_total": 52,
+        "progress_unit": "home",
+        "done_label": "Won"
+      }
+    },
+    {
+      "id": "sudoku",
+      "name": "Sudoku",
+      "package": "sudoku_app",
+      "repo": "https://github.com/RaphaelA4U/sudoku",
+      "tagline": "Four levels, hints that explain.",
+      "description": "Sudoku with big digits, pencil notes, four difficulties rated by a logical solver and hints that explain the next step the way a person would solve it.",
+      "players": "1, race in beheer",
+      "cover": ["5 3 . | 7", "6 . . | 1", ". 9 8 | ."],
+      "stats": {"list": "games", "best": "time", "best_label": "fastest solve"},
+      "battle": {
+        "type": "race",
+        "command": "$HOME/.local/bin/sudoku --profile u{uid} --battle {gid}",
+        "progress_total": 81,
+        "progress_unit": "filled",
+        "done_label": "Solved"
+      }
+    }
+  ]
+}
