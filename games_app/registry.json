@@ -40,7 +40,7 @@
       "package": "sudoku_app",
       "repo": "https://github.com/RaphaelA4U/sudoku",
       "tagline": "Four levels, hints that explain.",
-      "description": "Sudoku with big digits, pencil notes, four difficulties rated by a logical solver and hints that explain the next step the way a person would solve it.",
+      "description": "Sudoku with big digits, pencil notes, six difficulties (beginner to master, never chains or guessing) rated by a logical solver and hints that explain the next step the way a person would solve it.",
       "players": "1, race in beheer",
       "cover": ["5 3 . | 7", "6 . . | 1", ". 9 8 | ."],
       "stats": {"list": "games", "best": "time", "best_label": "fastest solve"},

@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.1.2 (2026-11-11)
+- The sudoku description says six difficulties (beginner to master), as in sudoku v1.4.0.
+
 ## v1.1.1 (2026-11-09)
 - `.env` files are ignored by git, so the games host password can never end up in the repo.
 
