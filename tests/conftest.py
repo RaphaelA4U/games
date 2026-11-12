@@ -14,4 +14,6 @@ def fake_home(tmp_path, monkeypatch):
     for game in ("yahtzee", "solitaire", "sudoku"):
         monkeypatch.delenv(f"{game.upper()}_HOME", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: None)
+    # Never start a real background update (it would git pull this checkout).
+    monkeypatch.setattr("games_app.library.update_all_in_background", lambda now=None: False)
     return tmp_path

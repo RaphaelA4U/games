@@ -1,5 +1,8 @@
 # Changelog
 
+## v1.4.1 (2026-11-12)
+- A games host stays current by itself: `games --list --json` (which BM Beheer asks every few minutes) starts `games --update-all` in the background at most once an hour. That updates the library and every installed game in place; a running game keeps its code and the next start uses the new version. `games --update-all` also works by hand.
+
 ## v1.4.0 (2026-11-12)
 - Leaderboards (`l`): the best results per game and settings, for your friends or everyone, over all seeds or one seed. Only games the server replayed count: each finished game is sent with its moves, and the server plays it again with the game's own `--verify` before it counts. A changed time or score is refused.
 - Challenges (`c`): `c` on a friend in friends starts a race (the same seed and settings for both); `c` on one of your wins in history asks friends to beat it. Enter on a challenge plays it; who is ahead shows next to it.

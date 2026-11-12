@@ -19,6 +19,8 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="with --list: machine-readable (for BM Beheer)")
     parser.add_argument("--install-all", action="store_true", help="install (or update) every game")
     parser.add_argument("--install-missing", action="store_true", help="install the games that are missing")
+    parser.add_argument("--update-all", action="store_true",
+                        help="update the library and every installed game now (a games host does this hourly)")
     parser.add_argument("--no-boot", action="store_true", help="skip the start-up screen")
     parser.add_argument("--no-update", action="store_true", help="skip the update check")
     args = parser.parse_args()
@@ -29,12 +31,19 @@ def main() -> None:
         print(f"games v{__version__}")
         return
 
-    from .library import install_all, list_games, load_registry, game_command
+    from .library import install_all, list_games, load_registry, game_command, update_all, update_all_in_background
+
+    if args.update_all:
+        for line in update_all():
+            print(line)
+        return
 
     if args.list:
         games = list_games()
         if args.json:
             print(json.dumps({"games": games}, ensure_ascii=False))
+            # BM Beheer asks this every few minutes: keep that games host current, in the background.
+            update_all_in_background()
         else:
             for g in games:
                 state = f"v{g['version']}" if g["version"] else ("installed" if g["installed"] else "not installed")

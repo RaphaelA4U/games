@@ -67,3 +67,36 @@ def test_cli_list_json(fake_home):
     data = json.loads(out.stdout)
     assert [g["id"] for g in data["games"]] == ["yahtzee", "solitaire", "sudoku"]
     assert all("battle" in g and "installed" in g for g in data["games"])
+
+
+def test_list_json_keeps_a_games_host_current_once_an_hour(fake_home, monkeypatch):
+    import importlib
+
+    importlib.reload(library)  # the real function (conftest stubs it out for every other test)
+    started = []
+    monkeypatch.setattr(library.subprocess, "Popen", lambda cmd, **kw: started.append(cmd))
+    assert library.update_all_in_background(now=10_000) is True
+    import os
+
+    stamp = library._update_stamp()
+    os.utime(stamp, (10_000, 10_000))
+    assert library.update_all_in_background(now=10_000 + 600) is False   # 10 minutes later: not again
+    assert library.update_all_in_background(now=10_000 + 3700) is True   # an hour later: again
+    assert len(started) == 2 and started[0][-1] == "--update-all"
+
+
+def test_update_all_runs_each_installed_games_own_updater(fake_home, monkeypatch):
+    calls = []
+    fake_install(fake_home, "sudoku", "1.7.0")
+    py = fake_home / ".sudoku" / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    monkeypatch.setattr("games_app.update.quick_sync_update", lambda: False)
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.setattr(library.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
+    out = library.update_all()
+    assert out[0] == "games: up to date" and "sudoku: ok" in out
+    assert calls == [[str(py), "-c", "from sudoku_app.update import quick_sync_update; quick_sync_update()"]]

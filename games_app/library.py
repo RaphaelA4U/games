@@ -265,3 +265,59 @@ def played_result(p: Played) -> str:
     if p.score is not None:
         parts.append(f"{p.score} pts")
     return ", ".join(parts)
+
+
+# -- keeping a games host current -----------------------------------------------------
+
+UPDATE_EVERY = 3600
+
+
+def _update_stamp() -> Path:
+    return Path.home() / ".config" / "games" / "last-update-all"
+
+
+def update_all() -> list[str]:
+    """Update the library and every installed game in place, each with its own updater (git pull +
+    dependencies). A running game keeps the code it loaded; its next start uses the new version."""
+    from .update import quick_sync_update
+
+    out = []
+    try:
+        out.append(f"games: {'updated' if quick_sync_update() else 'up to date'}")
+    except Exception as err:  # noqa: BLE001 - one failure must not stop the rest
+        out.append(f"games: failed ({err})")
+    for game in load_registry():
+        py = game_home(game) / ".venv" / ("Scripts/python.exe" if IS_WINDOWS else "bin/python")
+        if not py.exists():
+            continue
+        code = f"from {game['package']}.update import quick_sync_update; quick_sync_update()"
+        try:
+            rc = subprocess.run([str(py), "-c", code], cwd=str(Path.home()), capture_output=True,
+                                timeout=600).returncode
+            out.append(f"{game['id']}: {'ok' if rc == 0 else f'exit {rc}'}")
+        except (OSError, subprocess.SubprocessError) as err:
+            out.append(f"{game['id']}: failed ({err})")
+    return out
+
+
+def update_all_in_background(now: Optional[float] = None) -> bool:
+    """At most once an hour, start `games --update-all` detached (used by `--list --json`, which
+    BM Beheer asks every few minutes, so its games host stays on the newest versions)."""
+    import time as _time
+
+    now = now if now is not None else _time.time()
+    stamp = _update_stamp()
+    try:
+        if now - stamp.stat().st_mtime < UPDATE_EVERY:
+            return False
+    except OSError:
+        pass
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(int(now)))
+        subprocess.Popen([sys.executable, "-m", "games_app", "--update-all"], cwd=str(Path.home()),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=not IS_WINDOWS)
+        return True
+    except OSError:
+        return False
