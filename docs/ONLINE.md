@@ -1,6 +1,7 @@
 # Online: accounts, friends, leaderboards, battles
 
-Status: design (2026-11-12). Phase 1 is built in games v1.2.0. Phases 2 to 4 wait for a host.
+Status 2026-11-12: phase 1 is built (games v1.2.0), phase 2 (accounts and friends) in games v1.3.0 and `server/`,
+hosted on games.rustema.app. Phases 3 and 4 follow.
 
 The games stay terminal games that work fully offline. Online is optional, not promoted (no website, no
 listing), and built so that a stolen database or a hostile client cannot hurt anyone.
@@ -77,4 +78,5 @@ Each game's entry in `games_app/registry.json` has a `play` block:
    or "beat my time" on a seed you finished. Beheer chat battles keep working as they do and gain the
    same seed and settings choices.
 
-Open: the host and domain for the server (needs a public 443; not beheer, not the tailnet-only relay).
+Host: games.rustema.app on ubuntu01 (HAProxy with the PROXY protocol, Apache with the `*.rustema.app` certificate,
+the container on 127.0.0.1:14050 in `/docker/klanten/games-rustema-docker`).

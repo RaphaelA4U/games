@@ -175,3 +175,71 @@ def test_history_survives_odd_lines_and_unseeded_games(fake_home):
         play_args(games["sudoku"], 0, {})
     # Unknown setting values fall back to the default instead of reaching the game.
     assert play_args(games["sudoku"], 5, {"difficulty": "; rm -rf /"}) == ["--seed", "5", "--difficulty", "hard"]
+
+
+class FakeOnline:
+    """The server's answers for the friends screen, without a network."""
+
+    def __init__(self):
+        self.account = None
+        self.calls = []
+        self.state = {"friends": [], "incoming": [{"request_id": 7, "id": "b" * 16, "handle": "kyle#0042"}],
+                      "outgoing": [], "blocked": []}
+
+    def has_key(self):
+        return self.account is not None
+
+    def me(self):
+        return self.account
+
+    def friends(self):
+        return self.state
+
+    def register(self, name):
+        self.calls.append(("register", name))
+        self.account = {"id": "a" * 16, "handle": f"{name}#1234", "devices": []}
+        return dict(self.account, recovery_code="AAAAAA-BBBBBB-CCCCCC-DDDDDD")
+
+    def answer(self, rid, accept):
+        self.calls.append(("answer", rid, accept))
+        req = self.state["incoming"].pop()
+        if accept:
+            self.state["friends"].append({"id": req["id"], "handle": req["handle"]})
+        return {"ok": True}
+
+    def add_friend(self, handle):
+        self.calls.append(("add", handle))
+        return {"sent": True}
+
+
+@pytest.mark.asyncio
+async def test_friends_go_online_accept_and_add(fake_home):
+    from games_app.ui.app import FriendsScreen, RowList
+
+    fake = FakeOnline()
+    app = GamesApp(no_update=True, boot=False, runner=lambda c, e, p: 0)
+    async with app.run_test(size=SIZE) as pilot:
+        await library(pilot, app)
+        app.push_screen(FriendsScreen(online=fake))
+        await pilot.pause()
+        screen = app.screen
+        assert "Go online" in screen.query_one(RowList).rows[0].plain
+        await pilot.press(*"anna", "enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.calls == [("register", "anna")]
+        assert "AAAAAA-BBBBBB" in str(screen.query_one("#lib-note").render())
+        rows = [r.plain for r in screen.query_one(RowList).rows]
+        assert "kyle#0042 wants to be friends" in rows[0]
+        await pilot.press("a")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert ("answer", 7, True) in fake.calls
+        rows = [r.plain for r in screen.query_one(RowList).rows]
+        assert rows[0].startswith("kyle#0042")
+        # The add row takes typing; letters do not trigger the row actions there.
+        add = next(i for i, r in enumerate(rows) if r.startswith("Add a friend"))
+        screen.query_one(RowList).selected = add
+        await pilot.press(*"bert#0001", "enter")
+        await app.workers.wait_for_complete()
+        assert fake.calls[-1] == ("add", "bert#0001")

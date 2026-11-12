@@ -220,6 +220,8 @@ HELP_TEXT = f"""[b]GAMES v{__version__}[/b]  [dim]all terminal games in one plac
   [b]h[/b]          history: every game you played, of every game; enter
              plays the same seed with the same settings again
   [b]s[/b]          play a seed: pick a game, a number and the settings
+  [b]f[/b]          friends (optional, online): pick a name, add friends by
+             their handle; your key never leaves this device
   [b]?[/b]          this help            [b]q[/b]    quit
 
 [b u]Each game on its own[/b u]
@@ -399,6 +401,7 @@ FOOTER = [
     ("enter play", "play"),
     ("h history", "history"),
     ("s play a seed", "seed"),
+    ("f friends", "friends"),
     ("u install/update", "update"),
     ("? help", "help"),
     ("q quit", "quit"),
@@ -415,6 +418,7 @@ class LibraryScreen(Screen):
         Binding("u", "update", show=False),
         Binding("h", "history", show=False),
         Binding("s", "seed", show=False),
+        Binding("f", "friends", show=False),
         Binding("question_mark,f1", "help", show=False),
         Binding("q,escape,ctrl+q", "quit_app", show=False),
     ]
@@ -529,11 +533,14 @@ class LibraryScreen(Screen):
 
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"play": self.action_play, "update": self.action_update, "help": self.action_help,
-         "history": self.action_history, "seed": self.action_seed,
+         "history": self.action_history, "seed": self.action_seed, "friends": self.action_friends,
          "quit": self.action_quit_app}.get(event.action, lambda: None)()
 
     def action_history(self) -> None:
         self.app.push_screen(HistoryScreen(self.games))
+
+    def action_friends(self) -> None:
+        self.app.push_screen(FriendsScreen())
 
     def action_seed(self) -> None:
         self.app.push_screen(SeedScreen(self.games, self.games[self.shelf.selected]["id"]))
@@ -883,6 +890,207 @@ class SeedScreen(Screen):
 
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"play": self.action_play, "random": self.action_random,
+         "back": self.action_go_back}.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+FRIENDS_FOOTER = [("arrows pick", None), ("enter do it", "do"), ("type where it asks", None),
+                  ("r refresh", "refresh"), ("esc back", "back")]
+
+
+class FriendsScreen(Screen):
+    """Your online profile and friends. Online is optional: nothing is sent
+    until you pick a name here. Rows that ask for text take typing directly."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("enter", "do", show=False), Binding("escape", "go_back", show=False),
+    ]
+
+    def __init__(self, online=None) -> None:
+        super().__init__()
+        from ..online import Online
+
+        self.online = online or Online()
+        self.profile: Optional[dict] = None
+        self.data: dict = {}
+        self.rows: list[dict] = []
+        self.inputs: dict[str, str] = {}
+        self.busy = False
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar(FRIENDS_FOOTER, id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.draw()
+        if self.online.has_key():
+            self.note("Checking your account...")
+            self.run(lambda: None)
+        else:
+            self.note("Online is optional. Pick a name to get friends; nothing is sent before that.")
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "FRIENDS"))
+
+    def note(self, text: str) -> None:
+        self.query_one("#lib-note", Static).update(f" {text}")
+
+    # -- talking to the server (in a thread, the screen stays usable) -----
+    @work(thread=True, exclusive=True, group="online")
+    def run(self, action, done: Optional[str] = None) -> None:
+        from ..online import OnlineError, clean
+
+        self.busy = True
+        try:
+            result = action()
+            profile = self.online.me() if self.online.has_key() else None
+            data = self.online.friends() if profile else {}
+            self.app.call_from_thread(self._loaded, profile, data, result, done)
+        except OnlineError as err:
+            message = str(err)
+            if "unknown device" in message:
+                self.app.call_from_thread(self._loaded, None, {}, None, None)
+            else:
+                self.app.call_from_thread(self.note, f"[red]{clean(message, 120)}[/]")
+        finally:
+            self.busy = False
+
+    def _loaded(self, profile, data, result, done) -> None:
+        self.profile, self.data = profile, data or {}
+        self.draw()
+        if isinstance(result, dict) and result.get("recovery_code"):
+            self.note(f"[bold {WINC}]Your recovery code: {result['recovery_code']}[/]  Write it down: it is shown "
+                      "only now and gets your account back if you lose every device.")
+        elif isinstance(result, dict) and result.get("code"):
+            self.note(f"[bold {WINC}]Link code: {result['code']}[/]  On the other device: games, f, "
+                      "\"I have a link code\". It works once, for 10 minutes.")
+        elif done:
+            self.note(done)
+        elif profile:
+            self.note(f"You are [bold]{profile['handle']}[/]. Friends add you with exactly that.")
+        else:
+            self.note("Online is optional. Pick a name to get friends; nothing is sent before that.")
+
+    # -- rows ------------------------------------------------------------
+    def draw(self) -> None:
+        from ..online import clean
+
+        rows: list[dict] = []
+        if not self.profile:
+            rows.append({"id": "register", "input": "name", "label": "Go online, pick a name",
+                         "hint": "3-16 letters, digits, - or _"})
+            rows.append({"id": "link", "input": "code", "label": "I have a link code", "hint": "from your other device"})
+            rows.append({"id": "recover", "input": "recover", "label": "I have a recovery code",
+                         "hint": "your handle, a space, the code"})
+        else:
+            for r in self.data.get("incoming", []):
+                rows.append({"id": "incoming", "item": r, "label": f"{clean(r['handle'])} wants to be friends",
+                             "hint": "a accept   d decline", "style": f"bold {WINC}"})
+            for f in self.data.get("friends", []):
+                rows.append({"id": "friend", "item": f, "label": clean(f["handle"]), "hint": "x remove   b block"})
+            if not self.data.get("friends"):
+                rows.append({"id": "none", "label": "No friends yet.", "hint": "add one below", "style": "dim"})
+            for r in self.data.get("outgoing", []):
+                rows.append({"id": "outgoing", "item": r, "label": f"waiting for {clean(r['handle'])}",
+                             "hint": "x cancel", "style": "dim"})
+            rows.append({"id": "add", "input": "handle", "label": "Add a friend", "hint": "their handle, like anna#1234"})
+            rows.append({"id": "linkcode", "label": "Link another device", "hint": "enter shows a code"})
+            for b in self.data.get("blocked", []):
+                rows.append({"id": "blocked", "item": b, "label": f"blocked: {clean(b['handle'])}",
+                             "hint": "u unblock", "style": "dim"})
+        self.rows = rows
+        out = []
+        for row in rows:
+            text = Text(f"{row['label']:<34}", style=row.get("style", ""))
+            if row.get("input"):
+                typed = self.inputs.get(row["id"], "")
+                text.append("[ ", style="dim")
+                text.append(typed or " " * 12, style="bold")
+                text.append(" ]", style="dim")
+            text.append(f"  {row['hint']}", style="dim")
+            out.append(text)
+        header = f"  You: {self.profile['handle']}" if self.profile else None
+        self.query_one(RowList).set_rows(out, header)
+
+    def _row(self) -> Optional[dict]:
+        i = self.query_one(RowList).selected
+        return self.rows[i] if 0 <= i < len(self.rows) else None
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    async def on_key(self, event: events.Key) -> None:
+        row = self._row()
+        if row is None or self.busy:
+            return
+        ch = event.character
+        if row.get("input"):
+            if event.key == "backspace":
+                event.stop()
+                self.inputs[row["id"]] = self.inputs.get(row["id"], "")[:-1]
+                self.draw()
+            elif ch and len(ch) == 1 and ch.isprintable() and len(self.inputs.get(row["id"], "")) < 48:
+                event.stop()
+                self.inputs[row["id"]] = self.inputs.get(row["id"], "") + ch
+                self.draw()
+            return
+        item = row.get("item") or {}
+        actions = {
+            ("incoming", "a"): (lambda: self.online.answer(item["request_id"], True), "Accepted."),
+            ("incoming", "d"): (lambda: self.online.answer(item["request_id"], False), "Declined."),
+            ("friend", "x"): (lambda: self.online.unfriend(item["id"]), "Removed."),
+            ("friend", "b"): (lambda: self.online.block(item["id"]), "Blocked: they cannot ask again."),
+            ("outgoing", "x"): (lambda: self.online.unfriend(item["id"]), "Request cancelled."),
+            ("blocked", "u"): (lambda: self.online.block(item["id"], on=False), "Unblocked."),
+        }
+        if ch == "r":
+            event.stop()
+            self.run(lambda: None)
+        elif (row["id"], ch) in actions:
+            event.stop()
+            action, done = actions[(row["id"], ch)]
+            self.run(action, done)
+
+    @on(RowList.Picked)
+    def _picked(self, event: RowList.Picked) -> None:
+        if event.index >= 0:
+            self.action_do()
+
+    def action_do(self) -> None:
+        row = self._row()
+        if row is None or self.busy:
+            return
+        typed = self.inputs.get(row["id"], "").strip()
+        if row["id"] == "register":
+            if not typed:
+                return self.note("Type a name first.")
+            self.run(lambda: self.online.register(typed))
+        elif row["id"] == "link":
+            if not typed:
+                return self.note("Type the link code from your other device.")
+            self.run(lambda: self.online.link(typed), "This device is linked.")
+        elif row["id"] == "recover":
+            parts = typed.split()
+            if len(parts) != 2:
+                return self.note("Type your handle and the recovery code, with a space between.")
+            self.run(lambda: self.online.recover(parts[0], parts[1]))
+        elif row["id"] == "add":
+            if not typed:
+                return self.note("Type their handle, like anna#1234.")
+            self.inputs["add"] = ""
+            self.run(lambda: self.online.add_friend(typed),
+                     "Sent. If that handle exists, they see your request next time they look.")
+        elif row["id"] == "linkcode":
+            self.run(self.online.link_code)
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        {"do": self.action_do, "refresh": lambda: self.run(lambda: None),
          "back": self.action_go_back}.get(event.action, lambda: None)()
 
     def action_go_back(self) -> None:

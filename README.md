@@ -56,6 +56,12 @@ games --install-all       install or update every game
 
 The library and every game update themselves when they start, like Claude Code.
 
+## Online (optional)
+
+`f` in the library: pick a name and add friends by their handle. There is no
+password and no email: the device keeps its own key and signs every request.
+How it works and what the server may and may not do: `docs/ONLINE.md`.
+
 ## The registry
 
 `games_app/registry.json` is the one list of games. The library, its
