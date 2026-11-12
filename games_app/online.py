@@ -158,3 +158,97 @@ class Online:
 
     def recover(self, handle: str, code: str) -> dict:
         return self.call("POST", "/v1/recover", {"handle": handle, "recovery_code": code, "label": self.label()})
+
+    # -- results, leaderboards, challenges (phases 3 and 4) ------------------
+    def upload(self, game: str, record: dict) -> dict:
+        return self.call("POST", "/v1/results", {"game": game, "record": record})
+
+    def my_results(self) -> list:
+        return self.call("GET", "/v1/results/mine").get("results", [])
+
+    def leaderboard(self, game: str, settings: dict, seed: Optional[int] = None, scope: str = "friends") -> dict:
+        from urllib.parse import quote
+
+        key = ";".join(f"{k}={settings[k]}" for k in sorted(settings))
+        path = f"/v1/leaderboard?game={quote(game)}&settings={quote(key)}&scope={scope}"
+        if seed is not None:
+            path += f"&seed={int(seed)}"
+        return self.call("GET", path)
+
+    def challenge(self, to: list, game: str, settings: dict, seed: Optional[int] = None, kind: str = "race",
+                  result_id: Optional[int] = None) -> dict:
+        body: dict = {"to": list(to), "game": game, "settings": settings, "kind": kind}
+        if seed is not None:
+            body["seed"] = int(seed)
+        if result_id is not None:
+            body["result_id"] = int(result_id)
+        return self.call("POST", "/v1/challenges", body)
+
+    def challenges(self) -> list:
+        return self.call("GET", "/v1/challenges/list").get("challenges", [])
+
+    def answer_challenge(self, cid: int, accept: bool) -> dict:
+        return self.call("POST", f"/v1/challenges/{int(cid)}/{'accept' if accept else 'decline'}")
+
+
+# -- sending finished games -------------------------------------------------------
+
+def _sent_file() -> Path:
+    return config.CONFIG_DIR / "sent.json"
+
+
+def sharing() -> bool:
+    """Send finished games to the server (for leaderboards and challenges)? On once online, unless turned off."""
+    return bool(config.load_settings().get("share_results", True))
+
+
+def pending_records(games: list) -> "list[tuple[str, dict, str]]":
+    """Finished games with a seed that were not sent yet: (game id, record, its hash)."""
+    try:
+        sent = set(json.loads(_sent_file().read_text()))
+    except (OSError, ValueError):
+        sent = set()
+    out = []
+    for game in games:
+        play = game.get("play") or {}
+        path = Path.home() / ".config" / game["id"] / play.get("history", "games.jsonl")
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()[-300:]
+        except OSError:
+            continue
+        for line in lines:
+            if len(line) > 60_000:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or not isinstance(rec.get("seed"), int):
+                continue
+            digest = hashlib.sha256(line.encode()).hexdigest()
+            if digest not in sent:
+                out.append((game["id"], rec, digest))
+    return out
+
+
+def send_results(online: "Online", games: list, limit: int = 50) -> int:
+    """Send what is new (oldest first); remembers what went, so nothing goes twice."""
+    if not sharing() or not online.has_key():
+        return 0
+    try:
+        sent = set(json.loads(_sent_file().read_text()))
+    except (OSError, ValueError):
+        sent = set()
+    count = 0
+    for game_id, rec, digest in pending_records(games)[:limit]:
+        try:
+            online.upload(game_id, rec)
+        except OnlineError as err:
+            if "unknown device" in str(err) or "reached" in str(err):
+                break
+        sent.add(digest)  # also a refused one: sending it again would not change the answer
+        count += 1
+    if count:
+        _sent_file().parent.mkdir(parents=True, exist_ok=True)
+        _sent_file().write_text(json.dumps(sorted(sent)))
+    return count

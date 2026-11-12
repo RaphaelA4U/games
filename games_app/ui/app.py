@@ -221,7 +221,11 @@ HELP_TEXT = f"""[b]GAMES v{__version__}[/b]  [dim]all terminal games in one plac
              plays the same seed with the same settings again
   [b]s[/b]          play a seed: pick a game, a number and the settings
   [b]f[/b]          friends (optional, online): pick a name, add friends by
-             their handle; your key never leaves this device
+             their handle; your key never leaves this device. c on a
+             friend starts a race (the same seed and settings for both)
+  [b]l[/b]          leaderboards: per game and settings, friends or everyone,
+             all seeds or one. Only games the server replayed count
+  [b]c[/b]          challenges: races and "beat my time" from friends
   [b]?[/b]          this help            [b]q[/b]    quit
 
 [b u]Each game on its own[/b u]
@@ -402,6 +406,8 @@ FOOTER = [
     ("h history", "history"),
     ("s play a seed", "seed"),
     ("f friends", "friends"),
+    ("l leaderboards", "leaderboard"),
+    ("c challenges", "challenges"),
     ("u install/update", "update"),
     ("? help", "help"),
     ("q quit", "quit"),
@@ -419,6 +425,8 @@ class LibraryScreen(Screen):
         Binding("h", "history", show=False),
         Binding("s", "seed", show=False),
         Binding("f", "friends", show=False),
+        Binding("l", "leaderboard", show=False),
+        Binding("c", "challenges", show=False),
         Binding("question_mark,f1", "help", show=False),
         Binding("q,escape,ctrl+q", "quit_app", show=False),
     ]
@@ -443,9 +451,11 @@ class LibraryScreen(Screen):
         self.shelf.focus()
         self.refresh_states()
         self._check_versions()
+        self.send_results()
 
     def on_screen_resume(self) -> None:
         self.refresh_states()
+        self.send_results()
 
     def on_resize(self) -> None:
         self._draw_title()
@@ -534,6 +544,7 @@ class LibraryScreen(Screen):
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"play": self.action_play, "update": self.action_update, "help": self.action_help,
          "history": self.action_history, "seed": self.action_seed, "friends": self.action_friends,
+         "leaderboard": self.action_leaderboard, "challenges": self.action_challenges,
          "quit": self.action_quit_app}.get(event.action, lambda: None)()
 
     def action_history(self) -> None:
@@ -541,6 +552,24 @@ class LibraryScreen(Screen):
 
     def action_friends(self) -> None:
         self.app.push_screen(FriendsScreen())
+
+    def action_leaderboard(self) -> None:
+        self.app.push_screen(LeaderboardScreen(self.games, self.games[self.shelf.selected]["id"]))
+
+    def action_challenges(self) -> None:
+        self.app.push_screen(ChallengesScreen(self.games))
+
+    @work(thread=True, exclusive=True, group="send")
+    def send_results(self) -> None:
+        """Finished games go to the server in the background (only when online and sharing)."""
+        from ..online import Online, send_results
+
+        try:
+            online = Online()
+            if online.has_key():
+                send_results(online, self.games)
+        except Exception:  # noqa: BLE001 - never bother the shelf with a network problem
+            pass
 
     def action_seed(self) -> None:
         self.app.push_screen(SeedScreen(self.games, self.games[self.shelf.selected]["id"]))
@@ -682,7 +711,8 @@ class RowList(Widget, can_focus=True):
         self.post_message(self.Picked(i) if double or event.chain >= 2 else self.Picked(-1 - i))
 
 
-HISTORY_FOOTER = [("arrows pick", None), ("enter play it again", "play"), ("esc back", "back")]
+HISTORY_FOOTER = [("arrows pick", None), ("enter play it again", "play"), ("l this seed's leaderboard", "board"),
+                  ("c beat my time", "beat"), ("esc back", "back")]
 
 
 class HistoryScreen(Screen):
@@ -694,6 +724,7 @@ class HistoryScreen(Screen):
         Binding("pageup", "move(-10)", show=False), Binding("pagedown", "move(10)", show=False),
         Binding("home", "move(-100000)", show=False), Binding("end", "move(100000)", show=False),
         Binding("enter,space", "play", show=False),
+        Binding("l", "board", show=False), Binding("c", "beat", show=False),
         Binding("escape,q,backspace,h", "go_back", show=False),
     ]
 
@@ -757,8 +788,25 @@ class HistoryScreen(Screen):
         self.note(launch(self.app, game, play_args(game, p.seed, p.settings)))
         self.load()
 
+    def _selected(self) -> Optional[Played]:
+        return self.played[self.query_one(RowList).selected] if self.played else None
+
+    def action_board(self) -> None:
+        p = self._selected()
+        if p and p.seed is not None and p.game in self.games:
+            self.app.push_screen(LeaderboardScreen(list(self.games.values()), p.game, seed=p.seed,
+                                                   settings=p.settings))
+
+    def action_beat(self) -> None:
+        p = self._selected()
+        if not p or p.seed is None or not p.won:
+            self.note("Pick one of your wins with a seed: friends then try to beat it.")
+            return
+        self.app.push_screen(FriendPicker(p))
+
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
-        {"play": self.action_play, "back": self.action_go_back}.get(event.action, lambda: None)()
+        {"play": self.action_play, "back": self.action_go_back, "board": self.action_board,
+         "beat": self.action_beat}.get(event.action, lambda: None)()
 
     def action_go_back(self) -> None:
         self.app.pop_screen()
@@ -779,10 +827,14 @@ class SeedScreen(Screen):
         Binding("escape,q", "go_back", show=False),
     ]
 
-    def __init__(self, games: list[dict], game_id: str) -> None:
+    def __init__(self, games: list[dict], game_id: str, challenge_to: Optional[list[dict]] = None,
+                 online=None) -> None:
         super().__init__()
         self.games = [g for g in games if g.get("play")]
         self.game_i = next((i for i, g in enumerate(self.games) if g["id"] == game_id), 0)
+        # A race: the friends get the same seed and settings, you play it right away.
+        self.challenge_to = challenge_to
+        self.online = online
         self.settings = default_settings(self.games[self.game_i])
         self.seed: Optional[int] = self._random_seed()
         self._typing = False
@@ -805,10 +857,15 @@ class SeedScreen(Screen):
     def on_mount(self) -> None:
         self.query_one(RowList).focus()
         self.draw()
-        self.note("Same seed and settings = the same game for everyone. Send the seed to a friend.")
+        if self.challenge_to:
+            names = ", ".join(f["handle"] for f in self.challenge_to)
+            self.note(f"A race against {names}: you all get this seed and these settings.")
+        else:
+            self.note("Same seed and settings = the same game for everyone. Send the seed to a friend.")
 
     def on_resize(self) -> None:
-        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "PLAY A SEED"))
+        title = "CHALLENGE" if self.challenge_to else "PLAY A SEED"
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, title))
 
     def _rows(self) -> list[tuple[str, str, bool]]:
         rows = [("game", "Game", True), ("seed", "Seed", False)]
@@ -819,7 +876,7 @@ class SeedScreen(Screen):
         out = []
         for key, label, choice in self._rows():
             if key == "play":
-                row = Text("Play", style="bold")
+                row = Text("Send and play" if self.challenge_to else "Play", style="bold")
                 row.append(f"   {self.game['id']} " + " ".join(play_args(self.game, self.seed, self.settings)),
                            style="dim")
             else:
@@ -886,7 +943,25 @@ class SeedScreen(Screen):
         if not self.seed:
             self.note("[red]Type a seed first[/] (or r for a random one).")
             return
+        if self.challenge_to:
+            self._send_challenge()
+            return
         self.note(launch(self.app, self.game, play_args(self.game, self.seed, self.settings)))
+
+    @work(thread=True, exclusive=True, group="online")
+    def _send_challenge(self) -> None:
+        from ..online import OnlineError, clean
+
+        try:
+            self.online.challenge([f["id"] for f in self.challenge_to], self.game["id"], self.settings, self.seed)
+        except OnlineError as err:
+            self.app.call_from_thread(self.note, f"[red]{clean(str(err), 120)}[/]")
+            return
+        self.app.call_from_thread(self._sent_and_play)
+
+    def _sent_and_play(self) -> None:
+        launch(self.app, self.game, play_args(self.game, self.seed, self.settings))
+        self.note("Challenge sent. Your result counts once the server has replayed it (see c, challenges).")
 
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"play": self.action_play, "random": self.action_random,
@@ -993,7 +1068,10 @@ class FriendsScreen(Screen):
                 rows.append({"id": "incoming", "item": r, "label": f"{clean(r['handle'])} wants to be friends",
                              "hint": "a accept   d decline", "style": f"bold {WINC}"})
             for f in self.data.get("friends", []):
-                rows.append({"id": "friend", "item": f, "label": clean(f["handle"]), "hint": "x remove   b block"})
+                last = f.get("last_played")
+                label = clean(f["handle"]) + (f"  [{clean(last['game'], 12)}]" if last else "")
+                rows.append({"id": "friend", "item": f, "label": label.replace("[", "(").replace("]", ")"),
+                             "hint": "c challenge   x remove   b block"})
             if not self.data.get("friends"):
                 rows.append({"id": "none", "label": "No friends yet.", "hint": "add one below", "style": "dim"})
             for r in self.data.get("outgoing", []):
@@ -1001,6 +1079,10 @@ class FriendsScreen(Screen):
                              "hint": "x cancel", "style": "dim"})
             rows.append({"id": "add", "input": "handle", "label": "Add a friend", "hint": "their handle, like anna#1234"})
             rows.append({"id": "linkcode", "label": "Link another device", "hint": "enter shows a code"})
+            from ..online import sharing
+
+            rows.append({"id": "share", "label": f"Share my games: {'on' if sharing() else 'off'}",
+                         "hint": "enter switches; on = leaderboards and challenges"})
             for b in self.data.get("blocked", []):
                 rows.append({"id": "blocked", "item": b, "label": f"blocked: {clean(b['handle'])}",
                              "hint": "u unblock", "style": "dim"})
@@ -1052,6 +1134,9 @@ class FriendsScreen(Screen):
         if ch == "r":
             event.stop()
             self.run(lambda: None)
+        elif row["id"] == "friend" and ch == "c":
+            event.stop()
+            self.app.push_screen(SeedScreen(load_registry(), "sudoku", challenge_to=[item], online=self.online))
         elif (row["id"], ch) in actions:
             event.stop()
             action, done = actions[(row["id"], ch)]
@@ -1088,9 +1173,404 @@ class FriendsScreen(Screen):
                      "Sent. If that handle exists, they see your request next time they look.")
         elif row["id"] == "linkcode":
             self.run(self.online.link_code)
+        elif row["id"] == "share":
+            from ..config import load_settings, save_settings
+
+            settings = load_settings()
+            settings["share_results"] = not settings.get("share_results", True)
+            save_settings(settings)
+            self.draw()
+            self.note("Your finished games go to the server for leaderboards and challenges." if settings["share_results"]
+                      else "Nothing is sent any more. Leaderboards and challenges then do not show your games.")
 
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"do": self.action_do, "refresh": lambda: self.run(lambda: None),
+         "back": self.action_go_back}.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+def _value(row: dict) -> str:
+    v = row.get("value")
+    if v is None:
+        return "-"
+    return _fmt_secs(int(v)) if row.get("metric", "time") == "time" else f"{int(v)} pts"
+
+
+def _fmt_secs(seconds: int) -> str:
+    return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}" if seconds >= 3600 \
+        else f"{seconds // 60}:{seconds % 60:02d}"
+
+
+BOARD_FOOTER = [("arrows pick/change", None), ("0-9 seed", None), ("a all seeds", "all"),
+                ("r refresh", "refresh"), ("esc back", "back")]
+
+
+class LeaderboardScreen(Screen):
+    """Best results per game and settings, for friends or everyone, for all seeds or one.
+    Only results the server replayed count."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("left", "change(-1)", show=False), Binding("right", "change(1)", show=False),
+        Binding("escape,q", "go_back", show=False),
+    ]
+
+    def __init__(self, games: list[dict], game_id: str, seed: Optional[int] = None,
+                 settings: Optional[dict] = None, online=None) -> None:
+        super().__init__()
+        from ..online import Online
+
+        self.games = [g for g in games if g.get("play")]
+        self.game_i = next((i for i, g in enumerate(self.games) if g["id"] == game_id), 0)
+        self.settings = {**self._defaults(), **{k: v for k, v in (settings or {}).items() if k in self._defaults()}}
+        self.seed = seed
+        self.scope = "friends"
+        self.online = online or Online()
+        self.rows_data: list[dict] = []
+        self.status = "Loading..."
+
+    @property
+    def game(self) -> dict:
+        return self.games[self.game_i]
+
+    def _ranked(self) -> list[dict]:
+        return [s for s in self.game["play"].get("settings", []) if s.get("ranked", True)]
+
+    def _defaults(self) -> dict:
+        return {s["id"]: str(s["default"]) for s in self._ranked()}
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar(BOARD_FOOTER, id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.load()
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "LEADERBOARDS"))
+
+    def _controls(self) -> list[tuple[str, str, str]]:
+        rows = [("game", "Game", self.game["name"])]
+        rows += [(s["id"], s["label"], self.settings[s["id"]]) for s in self._ranked()]
+        rows.append(("scope", "Who", "friends" if self.scope == "friends" else "everyone"))
+        rows.append(("seed", "Seed", f"#{self.seed}" if self.seed else "all seeds"))
+        return rows
+
+    def draw(self) -> None:
+        from ..online import clean
+
+        out = []
+        for _, label, value in self._controls():
+            row = Text(f"{label:<12}")
+            row.append("< ", style="dim")
+            row.append(value, style="bold")
+            row.append(" >", style="dim")
+            out.append(row)
+        out.append(Text(""))
+        if not self.rows_data:
+            out.append(Text(self.status, style="dim"))
+        for r in self.rows_data:
+            line = Text(f"{r['rank']:>3}. {clean(r['handle']):<22} ", style=f"bold {WINC}" if r.get("me") else "")
+            line.append(f"{_value(r):>10}", style="bold")
+            line.append(f"   {r['games']} game{'s' if r['games'] != 1 else ''}", style="dim")
+            out.append(line)
+        self.query_one(RowList).set_rows(out)
+
+    @work(thread=True, exclusive=True, group="online")
+    def load(self) -> None:
+        from ..online import OnlineError, clean
+
+        self.app.call_from_thread(self._set, [], "Loading...")
+        if not self.online.has_key():
+            self.app.call_from_thread(self._set, [], "Go online first (f, friends) to see leaderboards.")
+            return
+        try:
+            data = self.online.leaderboard(self.game["id"], self.settings, self.seed, self.scope)
+        except OnlineError as err:
+            self.app.call_from_thread(self._set, [], clean(str(err), 120))
+            return
+        rows = data.get("rows", [])
+        self.app.call_from_thread(self._set, rows, "Nobody yet. Win one and it shows up here once the server "
+                                                   "has replayed it.")
+
+    def _set(self, rows: list, status: str) -> None:
+        self.rows_data, self.status = rows, status
+        self.draw()
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    def action_change(self, step: int) -> None:
+        i = self.query_one(RowList).selected
+        controls = self._controls()
+        if i >= len(controls):
+            return
+        key = controls[i][0]
+        if key == "game":
+            self.game_i = (self.game_i + step) % len(self.games)
+            self.settings = self._defaults()
+        elif key == "scope":
+            self.scope = "all" if self.scope == "friends" else "friends"
+        elif key == "seed":
+            self.seed = None
+        else:
+            spec = next(s for s in self._ranked() if s["id"] == key)
+            choices = [str(c) for c in spec["choices"]]
+            self.settings[key] = choices[(choices.index(self.settings[key]) + step) % len(choices)]
+        self.load()
+
+    async def on_key(self, event: events.Key) -> None:
+        ch = event.character
+        if ch and len(ch) == 1 and ch.isdigit():
+            event.stop()
+            new = int(f"{self.seed or ''}{ch}")
+            self.seed = new if 0 < new <= 999999 else self.seed
+            self.load()
+        elif ch == "a":
+            event.stop()
+            self.seed = None
+            self.load()
+        elif ch == "r":
+            event.stop()
+            self.load()
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        {"all": lambda: (setattr(self, "seed", None), self.load()), "refresh": self.load,
+         "back": self.action_go_back}.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+CHALLENGES_FOOTER = [("arrows pick", None), ("enter play it", "play"), ("d decline", "decline"),
+                     ("r refresh", "refresh"), ("esc back", "back")]
+
+
+class ChallengesScreen(Screen):
+    """Races and "beat my time" from friends, and the ones you sent, with who is ahead.
+    Enter plays it (the same seed and settings for everyone)."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("enter", "play", show=False), Binding("escape,q", "go_back", show=False),
+    ]
+
+    def __init__(self, games: list[dict], online=None) -> None:
+        super().__init__()
+        from ..online import Online
+
+        self.games = {g["id"]: g for g in games}
+        self.online = online or Online()
+        self.items: list[dict] = []
+        self.status = "Loading..."
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar(CHALLENGES_FOOTER, id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.load()
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "CHALLENGES"))
+
+    def note(self, text: str) -> None:
+        self.query_one("#lib-note", Static).update(text)
+
+    @work(thread=True, exclusive=True, group="online")
+    def load(self) -> None:
+        from ..online import OnlineError, clean
+
+        if not self.online.has_key():
+            self.app.call_from_thread(self._set, [], "Go online first (f, friends): then friends can challenge you.")
+            return
+        try:
+            items = self.online.challenges()
+        except OnlineError as err:
+            self.app.call_from_thread(self._set, [], clean(str(err), 120))
+            return
+        self.app.call_from_thread(self._set, items, "No challenges. In friends, c on a friend starts a race; in "
+                                                    "history, c on a win asks friends to beat it.")
+
+    def _set(self, items: list, status: str) -> None:
+        from ..online import clean
+
+        self.items, self.status = items, status
+        rows = []
+        for c in items:
+            game = self.games.get(c["game"], {"name": c["game"]})
+            what = "beat my time" if c["kind"] == "beat" else "race"
+            settings = " ".join(clean(v, 12) for v in c.get("settings", {}).values())
+            line = Text(f"{clean(c['from']):<18} {what:<13} {game['name']:<10} #{c['seed']:<7} {settings:<10} ")
+            if c.get("target"):
+                metric = "time" if c["target"].get("time") is not None else "score"
+                line.append(f"to beat {_value({'value': c['target'].get(metric), 'metric': metric})}  ", style="dim")
+            for p in c.get("players", []):
+                value = _value({"value": p.get("value"), "metric": "time" if c["game"] != "yahtzee" else "score"})
+                style = f"bold {WINC}" if p.get("me") else ("dim" if p.get("status") == "invited" else "")
+                line.append(f"{clean(p['handle'], 18)} {value}  ", style=style)
+            rows.append(line)
+        if not rows:
+            rows = [Text(status, style="dim")]
+        self.query_one(RowList).set_rows(rows)
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    def _current(self) -> Optional[dict]:
+        i = self.query_one(RowList).selected
+        return self.items[i] if 0 <= i < len(self.items) else None
+
+    @on(RowList.Picked)
+    def _picked(self, event: RowList.Picked) -> None:
+        if event.index >= 0:
+            self.action_play()
+
+    def action_play(self) -> None:
+        c = self._current()
+        if c is None or c["game"] not in self.games:
+            return
+        game = self.games[c["game"]]
+        if not c.get("mine"):
+            self._answer(c["id"], True)
+        self.note(launch(self.app, game, play_args(game, c["seed"], c.get("settings", {}))))
+        self.load()
+
+    @work(thread=True, group="answer")
+    def _answer(self, cid: int, accept: bool) -> None:
+        from ..online import OnlineError
+
+        try:
+            self.online.answer_challenge(cid, accept)
+        except OnlineError:
+            pass
+        if not accept:
+            self.load()
+
+    async def on_key(self, event: events.Key) -> None:
+        c = self._current()
+        if event.character == "d" and c is not None and not c.get("mine"):
+            event.stop()
+            self._answer(c["id"], False)
+            self.note("Declined.")
+        elif event.character == "r":
+            event.stop()
+            self.load()
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        c = self._current()
+        {"play": self.action_play, "refresh": self.load, "back": self.action_go_back,
+         "decline": (lambda: self._answer(c["id"], False)) if c and not c.get("mine") else (lambda: None)
+         }.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+class FriendPicker(Screen):
+    """Beat my time: pick the friends who get this win as a challenge."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("space", "toggle", show=False), Binding("enter", "send", show=False),
+        Binding("escape,q", "go_back", show=False),
+    ]
+
+    def __init__(self, played: Played, online=None) -> None:
+        super().__init__()
+        from ..online import Online
+
+        self.played = played
+        self.online = online or Online()
+        self.friends: list[dict] = []
+        self.chosen: set[str] = set()
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar([("space pick", "toggle"), ("enter send", "send"), ("esc back", "back")], id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.note(f"Beat my {played_result(self.played)} on #{self.played.seed}. Space picks friends, enter sends.")
+        self.load()
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "BEAT MY TIME"))
+
+    def note(self, text: str) -> None:
+        self.query_one("#lib-note", Static).update(text)
+
+    @work(thread=True, exclusive=True, group="online")
+    def load(self) -> None:
+        from ..online import OnlineError, clean
+
+        try:
+            friends = self.online.friends().get("friends", []) if self.online.has_key() else []
+        except OnlineError as err:
+            self.app.call_from_thread(self.note, f"[red]{clean(str(err), 120)}[/]")
+            return
+        self.app.call_from_thread(self._set, friends)
+
+    def _set(self, friends: list) -> None:
+        self.friends = friends
+        self.draw()
+        if not friends:
+            self.note("No friends yet: add some first (f, friends).")
+
+    def draw(self) -> None:
+        from ..online import clean
+
+        rows = [Text(("[x] " if f["id"] in self.chosen else "[ ] ") + clean(f["handle"])) for f in self.friends]
+        self.query_one(RowList).set_rows(rows or [Text("No friends yet.", style="dim")])
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    def action_toggle(self) -> None:
+        if self.friends:
+            fid = self.friends[self.query_one(RowList).selected]["id"]
+            self.chosen ^= {fid}
+            self.draw()
+
+    @on(RowList.Picked)
+    def _picked(self, event: RowList.Picked) -> None:
+        self.action_toggle()
+
+    @work(thread=True, exclusive=True, group="online")
+    def action_send(self) -> None:
+        from ..online import OnlineError, clean
+
+        if not self.chosen:
+            self.app.call_from_thread(self.note, "Pick at least one friend (space).")
+            return
+        p = self.played
+        try:
+            mine = self.online.my_results()
+            match = next((r for r in mine if r["game"] == p.game and r["seed"] == p.seed and r["status"] == "ok"
+                          and r["won"] and (p.time is None or r["time"] == p.time)
+                          and (p.score is None or r["score"] == p.score)), None)
+            if match is None:
+                self.app.call_from_thread(self.note, "The server has not replayed this win yet (or it was made "
+                                                     "before you went online). Try again in a minute.")
+                return
+            self.online.challenge(sorted(self.chosen), p.game, p.settings, kind="beat", result_id=match["id"])
+        except OnlineError as err:
+            self.app.call_from_thread(self.note, f"[red]{clean(str(err), 120)}[/]")
+            return
+        self.app.call_from_thread(self.app.pop_screen)
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        {"toggle": self.action_toggle, "send": self.action_send,
          "back": self.action_go_back}.get(event.action, lambda: None)()
 
     def action_go_back(self) -> None:

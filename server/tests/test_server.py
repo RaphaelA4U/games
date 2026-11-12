@@ -160,3 +160,132 @@ def test_answers_are_json_with_safe_headers(server):
     assert r.headers["x-content-type-options"] == "nosniff"
     assert "default-src 'none'" in r.headers["content-security-policy"]
     assert server.post("/healthz").status_code == 405
+
+
+# -- phases 3 and 4: results, verification, leaderboards, challenges ----------
+
+import sqlite3
+
+from games_server.verifier import verify_pending
+
+
+def verify_all(tmp_path, answers):
+    """Run the verifier with a fake replay: answers[(game, seed)] -> the --verify JSON."""
+    db = sqlite3.connect(str(tmp_path / "games.db"), isolation_level=None)
+    db.row_factory = sqlite3.Row
+
+    def runner(game, record):
+        rec = json.loads(record)
+        return answers.get((game, rec.get("seed"), rec.get("time")), {"ok": False, "reason": "no"})
+
+    verify_pending(db, runner=runner)
+
+
+def sudoku_record(seed, time_, difficulty="expert"):
+    return {"seed": seed, "difficulty": difficulty, "won": True, "time": time_, "date": "2026-11-12T10:00:00",
+            "log": ["v1=5@3"]}
+
+
+def ok_answer(seed, time_, difficulty="expert", won=True):
+    return {"ok": True, "game": "sudoku", "seed": seed, "settings": {"difficulty": difficulty},
+            "won": won, "time": time_, "score": None, "moves": 60}
+
+
+def test_results_count_only_after_the_replay(server, tmp_path, monkeypatch):
+    a = player(server, tmp_path, monkeypatch, "a")
+    b = player(server, tmp_path, monkeypatch, "b")
+    me_a, me_b = a.register("anna"), b.register("bert")
+    a.add_friend(me_b["handle"])
+    b.answer(b.friends()["incoming"][0]["request_id"], True)
+    r1 = a.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(7, 600)})
+    assert r1["status"] == "pending"
+    # The same record again is no second result.
+    assert a.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(7, 600)})["id"] == r1["id"]
+    b.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(7, 500)})
+    # Claims a time the replay does not back up: rejected, not on the board.
+    b.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(7, 5)})
+    board = a.call("GET", "/v1/leaderboard?game=sudoku&settings=difficulty%3Dexpert&scope=friends")
+    assert board["rows"] == []
+    verify_all(tmp_path, {("sudoku", 7, 600): ok_answer(7, 600), ("sudoku", 7, 500): ok_answer(7, 480)})
+    rows = a.call("GET", "/v1/leaderboard?game=sudoku&settings=difficulty%3Dexpert&scope=friends")["rows"]
+    # The replay's time counts (480), not the uploaded one (500).
+    assert [(r["handle"], r["value"]) for r in rows] == [(me_b["handle"], 480), (me_a["handle"], 600)]
+    assert rows[1]["me"] is True
+    mine = {r["time"]: r["status"] for r in b.call("GET", "/v1/results/mine")["results"]}
+    assert mine == {480: "ok", None: "rejected"}
+    # Per seed, and another difficulty is another board.
+    assert a.call("GET", "/v1/leaderboard?game=sudoku&settings=difficulty%3Dexpert&seed=8&scope=all")["rows"] == []
+    assert a.call("GET", "/v1/leaderboard?game=sudoku&settings=difficulty%3Dhard&scope=all")["rows"] == []
+    assert a.friends()["friends"][0]["last_played"]["game"] == "sudoku"
+
+
+def test_replay_about_another_game_is_rejected(server, tmp_path, monkeypatch):
+    a = player(server, tmp_path, monkeypatch, "a")
+    a.register("anna")
+    a.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(7, 600)})
+    verify_all(tmp_path, {("sudoku", 7, 600): ok_answer(8, 600)})  # replayed seed 8, not 7
+    assert a.call("GET", "/v1/results/mine")["results"][0]["reason"] == "replay is about another game"
+
+
+def test_bad_results_are_refused(server, tmp_path, monkeypatch):
+    a = player(server, tmp_path, monkeypatch, "a")
+    a.register("anna")
+    for body, msg in [({"game": "chess", "record": sudoku_record(1, 9)}, "unknown game"),
+                      ({"game": "sudoku", "record": {"difficulty": "expert"}}, "seed"),
+                      ({"game": "sudoku", "record": sudoku_record(1, 9, "insane")}, "difficulty"),
+                      ({"game": "sudoku", "record": "x"}, "record")]:
+        with pytest.raises(OnlineError, match=msg):
+            a.call("POST", "/v1/results", body)
+
+
+def test_challenges_race_and_beat(server, tmp_path, monkeypatch):
+    a = player(server, tmp_path, monkeypatch, "a")
+    b = player(server, tmp_path, monkeypatch, "b")
+    c = player(server, tmp_path, monkeypatch, "c")
+    me_a, me_b, me_c = a.register("anna"), b.register("bert"), c.register("carl")
+    a.add_friend(me_b["handle"])
+    b.answer(b.friends()["incoming"][0]["request_id"], True)
+    # Only friends.
+    with pytest.raises(OnlineError, match="only challenge friends"):
+        a.call("POST", "/v1/challenges", {"to": [me_c["id"]], "game": "sudoku", "kind": "race"})
+    made = a.call("POST", "/v1/challenges", {"to": [me_b["id"]], "game": "sudoku",
+                                              "settings": {"difficulty": "master"}, "kind": "race"})
+    assert 1 <= made["seed"] <= 999999  # no seed given: the server picks one, the same for both
+    seen = b.call("GET", "/v1/challenges/list")["challenges"][0]
+    assert seen["from"] == me_a["handle"] and seen["settings"] == {"difficulty": "master"}
+    assert {p["handle"]: p["status"] for p in seen["players"]} == {me_a["handle"]: "accepted", me_b["handle"]: "invited"}
+    b.call("POST", f"/v1/challenges/{seen['id']}/accept")
+    seed = made["seed"]
+    b.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(seed, 900, "master")})
+    verify_all(tmp_path, {("sudoku", seed, 900): {**ok_answer(seed, 900, "master")}})
+    standing = {p["handle"]: p["value"] for p in a.call("GET", "/v1/challenges/list")["challenges"][0]["players"]}
+    assert standing == {me_a["handle"]: None, me_b["handle"]: 900}
+    # Beat my time: only on one of your own verified wins.
+    with pytest.raises(OnlineError, match="verified wins"):
+        a.call("POST", "/v1/challenges", {"to": [me_b["id"]], "game": "sudoku", "kind": "beat", "result_id": 999})
+    a.call("POST", "/v1/results", {"game": "sudoku", "record": sudoku_record(11, 700)})
+    verify_all(tmp_path, {("sudoku", 11, 700): ok_answer(11, 700)})
+    rid = a.call("GET", "/v1/results/mine")["results"][0]["id"]
+    beat = a.call("POST", "/v1/challenges", {"to": [me_b["id"]], "game": "sudoku", "kind": "beat", "result_id": rid})
+    got = next(x for x in b.call("GET", "/v1/challenges/list")["challenges"] if x["id"] == beat["id"])
+    assert got["kind"] == "beat" and got["seed"] == 11 and got["target"]["time"] == 700
+    b.call("POST", f"/v1/challenges/{got['id']}/decline")
+    assert all(x["id"] != got["id"] for x in b.call("GET", "/v1/challenges/list")["challenges"])
+
+
+def test_backups_keep_the_last_days(tmp_path, monkeypatch):
+    import os
+
+    from games_server.app import backup_once
+
+    create_app(str(tmp_path / "games.db"), trusted_proxies=set())
+    folder = tmp_path / "backups"
+    folder.mkdir()
+    for day in range(20):
+        (folder / f"games-202601{day + 1:02d}.db").write_text("old")
+    made = backup_once(str(tmp_path / "games.db"), keep=14)
+    names = sorted(os.listdir(folder))
+    assert len(names) == 14 and os.path.basename(made) in names
+    assert oct(os.stat(made).st_mode & 0o777) == "0o600"
+    con = sqlite3.connect(made)
+    assert con.execute("SELECT COUNT(*) FROM players").fetchone()[0] == 0

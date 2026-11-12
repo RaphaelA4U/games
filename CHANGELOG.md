@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.0 (2026-11-12)
+- Leaderboards (`l`): the best results per game and settings, for your friends or everyone, over all seeds or one seed. Only games the server replayed count: each finished game is sent with its moves, and the server plays it again with the game's own `--verify` before it counts. A changed time or score is refused.
+- Challenges (`c`): `c` on a friend in friends starts a race (the same seed and settings for both); `c` on one of your wins in history asks friends to beat it. Enter on a challenge plays it; who is ahead shows next to it.
+- Your finished games go to the server in the background once you are online; "Share my games" in friends turns that off.
+- In history, `l` shows the leaderboard of that one seed.
+
 ## v1.3.1 (2026-11-12)
 - A long message at the bottom wraps in line with its first line.
 

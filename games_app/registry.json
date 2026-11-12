@@ -40,7 +40,8 @@
               "free_joker",
               "simple"
             ],
-            "default": "official"
+            "default": "official",
+            "ranked": true
           },
           {
             "id": "bots",
@@ -52,7 +53,8 @@
               "3",
               "4"
             ],
-            "default": "2"
+            "default": "2",
+            "ranked": false
           },
           {
             "id": "level",
@@ -64,7 +66,8 @@
               "hard",
               "optimal"
             ],
-            "default": "medium"
+            "default": "medium",
+            "ranked": false
           }
         ],
         "history": "games.jsonl",
@@ -112,7 +115,8 @@
               "1",
               "3"
             ],
-            "default": "1"
+            "default": "1",
+            "ranked": true
           },
           {
             "id": "scoring",
@@ -124,7 +128,8 @@
               "vegas_cumulative",
               "none"
             ],
-            "default": "standard"
+            "default": "standard",
+            "ranked": true
           }
         ],
         "history": "games.jsonl",
@@ -176,7 +181,8 @@
               "expert",
               "master"
             ],
-            "default": "hard"
+            "default": "hard",
+            "ranked": true
           }
         ],
         "history": "games.jsonl",

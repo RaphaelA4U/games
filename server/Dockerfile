@@ -1,12 +1,15 @@
-# The games server (docs/ONLINE.md). Small, non-root, read-only at run time.
+# The games server and its verifier (docs/ONLINE.md). Small, non-root, read-only at run time.
+# Build context: the repo root (the server reads games_app/registry.json, the one list of games).
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --require-hashes -r /tmp/requirements.txt \
+COPY server/requirements.txt server/requirements-verify.txt /tmp/
+# The games themselves (pinned tags, hashed) are only used by the verifier's --verify replays.
+RUN pip install --require-hashes -r /tmp/requirements.txt -r /tmp/requirements-verify.txt \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin gamesrv \
     && mkdir /data && chown gamesrv /data
-COPY games_server /app/games_server
+COPY server/games_server /app/games_server
+COPY games_app/registry.json /app/games_server/registry.json
 WORKDIR /app
 USER 10001
 ENV GAMES_DB=/data/games.db GAMES_SERVER_AUTOSTART=1

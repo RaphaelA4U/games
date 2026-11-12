@@ -67,6 +67,23 @@ CREATE TABLE IF NOT EXISTS link_codes (
     expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS rate (bucket TEXT NOT NULL, window INTEGER NOT NULL, count INTEGER NOT NULL,
     PRIMARY KEY (bucket, window));
+CREATE TABLE IF NOT EXISTS results (
+    id INTEGER PRIMARY KEY, player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    game TEXT NOT NULL, seed INTEGER NOT NULL, settings TEXT NOT NULL, record TEXT NOT NULL,
+    record_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', reason TEXT NOT NULL DEFAULT '',
+    won INTEGER, time INTEGER, score INTEGER, moves INTEGER, played TEXT, created INTEGER NOT NULL,
+    verified INTEGER, UNIQUE (player_id, record_hash));
+CREATE INDEX IF NOT EXISTS results_board ON results (game, settings, seed, status);
+CREATE INDEX IF NOT EXISTS results_pending ON results (status, id);
+CREATE TABLE IF NOT EXISTS challenges (
+    id INTEGER PRIMARY KEY, from_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    game TEXT NOT NULL, seed INTEGER NOT NULL, settings TEXT NOT NULL, kind TEXT NOT NULL,
+    target_result INTEGER REFERENCES results(id) ON DELETE SET NULL, created INTEGER NOT NULL,
+    expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS challenge_players (
+    challenge_id INTEGER NOT NULL REFERENCES challenges(id) ON DELETE CASCADE,
+    player_id TEXT NOT NULL REFERENCES players(id) ON DELETE CASCADE, status TEXT NOT NULL,
+    PRIMARY KEY (challenge_id, player_id));
 """
 
 # (bucket, max requests, window in seconds)
@@ -78,7 +95,41 @@ LIMITS = {
     "recover": (5, 3600),
     "friend_request": (30, 86400),
     "bad_sig": (20, 3600),
+    "results": (300, 86400),
+    "challenges": (50, 86400),
 }
+MAX_SEED = 999999
+CHALLENGE_DAYS = 7
+
+
+def load_games(path: Optional[str] = None) -> dict:
+    """The games and their settings from the library's registry.json (the one list of games)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [path, os.environ.get("GAMES_REGISTRY"), os.path.join(here, "registry.json"),
+                  os.path.join(here, "..", "..", "games_app", "registry.json")]
+    for candidate in filter(None, candidates):
+        if os.path.exists(candidate):
+            with open(candidate, encoding="utf-8") as fh:
+                data = json.load(fh)
+            out = {}
+            for g in data.get("games", []):
+                play = g.get("play") or {}
+                result = play.get("result") or {}
+                out[g["id"]] = {
+                    # Only the settings that make two games the same game for a ranking.
+                    "settings": {x["id"]: [str(c) for c in x["choices"]] for x in play.get("settings", [])
+                                 if x.get("ranked", True)},
+                    "defaults": {x["id"]: str(x["default"]) for x in play.get("settings", [])
+                                 if x.get("ranked", True)},
+                    # Time games rank the fastest win, score games the highest score.
+                    "metric": "time" if result.get("time") else "score",
+                }
+            return out
+    raise RuntimeError("registry.json not found")
+
+
+def settings_key(settings: dict) -> str:
+    return ";".join(f"{k}={settings[k]}" for k in sorted(settings))
 
 
 class Fail(Exception):
@@ -143,7 +194,8 @@ def report(kind: str, severity: str, details: dict) -> None:
         return
 
     def send() -> None:
-        body = json.dumps({"soort": kind, "ernst": severity, "details": json.dumps(details)[:4000],
+        small = details if len(json.dumps(details)) < 3500 else {"note": "details too long"}
+        body = json.dumps({"soort": kind, "ernst": severity, "details": dict(small, app="games.rustema.app"),
                            "tijd": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}).encode()
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Content-Type": "application/json", "Authorization": f"Bearer {token}"})
@@ -180,8 +232,10 @@ class SafeHeaders:
         await self.app(scope, receive, with_headers)
 
 
-def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]] = None) -> Starlette:
+def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]] = None,
+               registry: Optional[str] = None) -> Starlette:
     store = Store(db_path or os.environ.get("GAMES_DB", "/data/games.db"))
+    games = load_games(registry)
     proxies = trusted_proxies if trusted_proxies is not None else set(
         filter(None, os.environ.get("TRUSTED_PROXIES", "127.0.0.1").split(",")))
 
@@ -401,8 +455,14 @@ def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]
             "WHERE r.from_id = ? ORDER BY r.created", (pid,)).fetchall()
         blocks = db.execute("SELECT p.* FROM blocks b JOIN players p ON p.id = b.blocked WHERE b.blocker = ?",
                             (pid,)).fetchall()
+        def last(pid_: str) -> Optional[dict]:
+            row = db.execute("SELECT game, played FROM results WHERE player_id = ? AND status = 'ok' "
+                             "ORDER BY id DESC LIMIT 1", (pid_,)).fetchone()
+            return {"game": row["game"], "date": row["played"]} if row else None
+
         return {
-            "friends": [{"id": r["id"], "handle": handle(r), "since": r["since"]} for r in rows],
+            "friends": [{"id": r["id"], "handle": handle(r), "since": r["since"], "last_played": last(r["id"])}
+                        for r in rows],
             "incoming": [{"request_id": r["request_id"], "id": r["id"], "handle": handle(r)} for r in incoming],
             "outgoing": [{"request_id": r["request_id"], "id": r["id"], "handle": handle(r)} for r in outgoing],
             "blocked": [{"id": r["id"], "handle": handle(r)} for r in blocks],
@@ -546,6 +606,175 @@ def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]
         report("passkey_herstel", "info", {"player": row["id"]})
         return {**player_view(row), "recovery_code": new_code}
 
+    # -- results, leaderboards, challenges (phases 3 and 4) ---------------------
+    def game_and_settings(game: Any, settings: Any) -> tuple[str, dict]:
+        if not isinstance(game, str) or game not in games:
+            raise Fail(400, "unknown game")
+        spec = games[game]
+        settings = settings if isinstance(settings, dict) else {}
+        clean = {}
+        for key, choices in spec["settings"].items():
+            value = str(settings.get(key, spec["defaults"][key]))
+            if value not in choices:
+                raise Fail(400, f"{key} is not valid")
+            clean[key] = value
+        return game, clean
+
+    def seed_of(value: Any, allow_none: bool = False) -> Optional[int]:
+        if value is None and allow_none:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SEED:
+            raise Fail(400, "seed is not valid")
+        return value
+
+    @endpoint("player")
+    def upload_result(request, data, me):
+        """A finished game from games.jsonl. It only counts after the verifier replayed it."""
+        hit("results", me["id"])
+        record = data.get("record")
+        if not isinstance(record, dict):
+            raise Fail(400, "record is missing")
+        game, settings = game_and_settings(data.get("game"), {k: record.get(k) for k in games.get(
+            data.get("game") if isinstance(data.get("game"), str) else "", {}).get("settings", {})})
+        seed = seed_of(record.get("seed"))
+        raw = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(raw.encode()).hexdigest()
+        played = str(record.get("date", ""))[:19]
+        db = store.db()
+        try:
+            db.execute("INSERT INTO results (player_id, game, seed, settings, record, record_hash, played, created) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (me["id"], game, seed, settings_key(settings), raw, digest, played, now()))
+        except sqlite3.IntegrityError:
+            pass  # sent before: fine
+        row = db.execute("SELECT id, status FROM results WHERE player_id = ? AND record_hash = ?",
+                         (me["id"], digest)).fetchone()
+        return 202, {"id": row["id"], "status": row["status"]}
+
+    @endpoint("player")
+    def my_results(request, data, me):
+        rows = store.db().execute(
+            "SELECT id, game, seed, settings, status, reason, won, time, score, played FROM results "
+            "WHERE player_id = ? ORDER BY id DESC LIMIT 100", (me["id"],)).fetchall()
+        return {"results": [dict(r) for r in rows]}
+
+    def friend_ids(pid: str) -> list[str]:
+        rows = store.db().execute("SELECT CASE WHEN a = ? THEN b ELSE a END FROM friends WHERE a = ? OR b = ?",
+                                  (pid, pid, pid)).fetchall()
+        return [r[0] for r in rows]
+
+    def board(game: str, settings: str, seed: Optional[int], players: Optional[list[str]],
+              since: int = 0, limit: int = 20, me_id: str = "") -> list[dict]:
+        metric = games[game]["metric"]
+        best = "MIN(r.time)" if metric == "time" else "MAX(r.score)"
+        where = ["r.game = ?", "r.settings = ?", "r.status = 'ok'", "r.created >= ?"]
+        args: list = [game, settings, since]
+        if metric == "time":
+            where.append("r.won = 1 AND r.time IS NOT NULL")
+        if seed is not None:
+            where.append("r.seed = ?")
+            args.append(seed)
+        if players is not None:
+            where.append(f"r.player_id IN ({','.join('?' * len(players))})")
+            args += players
+        rows = store.db().execute(
+            f"SELECT p.id, p.name, p.tag, {best} AS value, COUNT(*) AS games FROM results r "
+            f"JOIN players p ON p.id = r.player_id WHERE {' AND '.join(where)} GROUP BY p.id "
+            f"ORDER BY value {'ASC' if metric == 'time' else 'DESC'}, p.name LIMIT ?", (*args, limit)).fetchall()
+        return [{"rank": i + 1, "id": r["id"], "handle": handle(r), "value": r["value"], "games": r["games"],
+                 "me": r["id"] == me_id, "metric": metric} for i, r in enumerate(rows)]
+
+    @endpoint("player")
+    def leaderboard(request, data, me):
+        q = request.query_params
+        game, settings = game_and_settings(q.get("game"), dict(
+            part.split("=", 1) for part in (q.get("settings") or "").split(";") if "=" in part))
+        seed = None if q.get("seed") in (None, "") else seed_of(int(q["seed"]) if q["seed"].isdigit() else -1)
+        scope = q.get("scope", "friends")
+        if scope not in ("friends", "all"):
+            raise Fail(400, "scope is friends or all")
+        players = None if scope == "all" else friend_ids(me["id"]) + [me["id"]]
+        return {"game": game, "settings": settings, "seed": seed, "scope": scope,
+                "rows": board(game, settings_key(settings), seed, players, me_id=me["id"])}
+
+    @endpoint("player")
+    def create_challenge(request, data, me):
+        hit("challenges", me["id"])
+        game, settings = game_and_settings(data.get("game"), data.get("settings"))
+        kind = data.get("kind", "race")
+        if kind not in ("race", "beat"):
+            raise Fail(400, "kind is race or beat")
+        to = data.get("to")
+        if not isinstance(to, list) or not 1 <= len(to) <= 8 or not all(isinstance(t, str) and ID_RE.fullmatch(t) for t in to):
+            raise Fail(400, "pick 1 to 8 friends")
+        friends_of_me = set(friend_ids(me["id"]))
+        if not set(to) <= friends_of_me:
+            raise Fail(403, "you can only challenge friends")
+        target = None
+        db = store.db()
+        if kind == "beat":
+            rid = data.get("result_id")
+            row = db.execute("SELECT * FROM results WHERE id = ? AND player_id = ? AND status = 'ok' AND won = 1",
+                             (rid if isinstance(rid, int) else -1, me["id"])).fetchone()
+            if row is None:
+                raise Fail(400, "pick one of your own verified wins to beat")
+            game, seed, skey, target = row["game"], row["seed"], row["settings"], row["id"]
+        else:
+            seed = seed_of(data.get("seed"), allow_none=True) or 1 + secrets.randbelow(MAX_SEED)
+            skey = settings_key(settings)
+        with tx(db):
+            cur = db.execute("INSERT INTO challenges (from_id, game, seed, settings, kind, target_result, created, expires) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             (me["id"], game, seed, skey, kind, target, now(), now() + CHALLENGE_DAYS * 86400))
+            cid = cur.lastrowid
+            db.execute("INSERT INTO challenge_players (challenge_id, player_id, status) VALUES (?, ?, 'accepted')",
+                       (cid, me["id"]))
+            for pid in set(to):
+                db.execute("INSERT INTO challenge_players (challenge_id, player_id, status) VALUES (?, ?, 'invited')",
+                           (cid, pid))
+        return 201, {"id": cid, "seed": seed}
+
+    @endpoint("player")
+    def list_challenges(request, data, me):
+        db = store.db()
+        rows = db.execute(
+            "SELECT c.*, p.name, p.tag FROM challenges c JOIN challenge_players cp ON cp.challenge_id = c.id "
+            "JOIN players p ON p.id = c.from_id WHERE cp.player_id = ? AND c.expires > ? AND cp.status != 'declined' "
+            "ORDER BY c.id DESC LIMIT 50", (me["id"], now())).fetchall()
+        out = []
+        for c in rows:
+            members = db.execute(
+                "SELECT cp.status, p.id, p.name, p.tag FROM challenge_players cp JOIN players p ON p.id = cp.player_id "
+                "WHERE cp.challenge_id = ?", (c["id"],)).fetchall()
+            standings = {r["id"]: r for r in board(c["game"], c["settings"], c["seed"],
+                                                   [m["id"] for m in members], since=c["created"], limit=10)}
+            target = None
+            if c["target_result"]:
+                t = db.execute("SELECT time, score FROM results WHERE id = ?", (c["target_result"],)).fetchone()
+                target = dict(t) if t else None
+            out.append({
+                "id": c["id"], "game": c["game"], "seed": c["seed"],
+                "settings": dict(part.split("=", 1) for part in c["settings"].split(";") if "=" in part),
+                "kind": c["kind"], "from": f"{c['name']}#{c['tag']}", "mine": c["from_id"] == me["id"],
+                "expires": c["expires"], "target": target,
+                "players": [{"handle": handle(m), "status": m["status"], "me": m["id"] == me["id"],
+                             "value": standings[m["id"]]["value"] if m["id"] in standings else None}
+                            for m in members],
+            })
+        return {"challenges": out}
+
+    @endpoint("player")
+    def answer_challenge(request, data, me):
+        verb = request.path_params["verb"]
+        if verb not in ("accept", "decline"):
+            raise Fail(404, "not found")
+        cur = store.db().execute(
+            "UPDATE challenge_players SET status = ? WHERE challenge_id = ? AND player_id = ? AND status = 'invited'",
+            ("accepted" if verb == "accept" else "declined", request.path_params["cid"], me["id"]))
+        if cur.rowcount == 0:
+            raise Fail(404, "no such challenge")
+        return {"ok": True}
+
     async def not_found(request: Request, exc: Exception) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -566,6 +795,12 @@ def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]
         Route("/v1/devices/link", link, methods=["POST"]),
         Route("/v1/devices/{did:str}", remove_device, methods=["DELETE"]),
         Route("/v1/recover", recover, methods=["POST"]),
+        Route("/v1/results", upload_result, methods=["POST"]),
+        Route("/v1/results/mine", my_results, methods=["GET"]),
+        Route("/v1/leaderboard", leaderboard, methods=["GET"]),
+        Route("/v1/challenges", create_challenge, methods=["POST"]),
+        Route("/v1/challenges/list", list_challenges, methods=["GET"]),
+        Route("/v1/challenges/{cid:int}/{verb:str}", answer_challenge, methods=["POST"]),
     ]
     app = Starlette(routes=routes, exception_handlers={404: not_found, 405: not_allowed})
     app.add_middleware(SafeHeaders)
@@ -573,6 +808,40 @@ def create_app(db_path: Optional[str] = None, trusted_proxies: Optional[set[str]
     return app
 
 
+def backup_once(db_path: str, keep: int = 14) -> str:
+    """A consistent copy (SQLite's own backup, safe while the server writes) in backups/,
+    one per day, the last `keep` days kept."""
+    folder = os.path.join(os.path.dirname(db_path), "backups")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    target = os.path.join(folder, time.strftime("games-%Y%m%d.db", time.gmtime()))
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(target)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    os.chmod(target, 0o600)
+    old = sorted(f for f in os.listdir(folder) if f.startswith("games-") and f.endswith(".db"))
+    for name in old[:-keep]:
+        os.remove(os.path.join(folder, name))
+    return target
+
+
+def start_backups(db_path: str) -> None:
+    def loop() -> None:
+        while True:
+            try:
+                backup_once(db_path)
+            except Exception:  # noqa: BLE001 - a failed backup must not stop the server; retried in an hour
+                time.sleep(3600)
+                continue
+            time.sleep(24 * 3600)
+
+    threading.Thread(target=loop, daemon=True, name="backups").start()
+
+
 app = None
 if os.environ.get("GAMES_SERVER_AUTOSTART") == "1":
     app = create_app()
+    start_backups(os.environ.get("GAMES_DB", "/data/games.db"))

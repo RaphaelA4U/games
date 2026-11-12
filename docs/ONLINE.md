@@ -1,7 +1,8 @@
 # Online: accounts, friends, leaderboards, battles
 
-Status 2026-11-12: phase 1 is built (games v1.2.0), phase 2 (accounts and friends) in games v1.3.0 and `server/`,
-hosted on games.rustema.app. Phases 3 and 4 follow.
+Status 2026-11-12: all four phases are built: the contract and history (games v1.2.0), accounts and friends
+(v1.3.0), leaderboards with replayed results and challenges (v1.4.0, every game has `--verify`). The server runs on
+games.rustema.app with a verifier container that has no network.
 
 The games stay terminal games that work fully offline. Online is optional, not promoted (no website, no
 listing), and built so that a stolen database or a hostile client cannot hurt anyone.
@@ -37,7 +38,21 @@ Each game's entry in `games_app/registry.json` has a `play` block:
 - Every game ever played is one line in `~/.config/<game>/games.jsonl` with at least `seed`, every setting
   id from `settings` as a top-level key, `won`, `date`, `time` and/or `score`, `version` and `log` (every
   move with its clock, enough to replay the game).
-- Phase 3 adds `<game> --verify`: reads one record on stdin, replays the log, prints the real result.
+- `<game> --verify` (phase 3): reads ONE record (a `games.jsonl` line) on stdin and replays it from scratch:
+  the game is rebuilt from `seed` and the settings in the record (never from a puzzle, deal or dice stored in the
+  record), every move in `log` is applied with the game's own rules, and the result is computed, not copied. It
+  prints one JSON line and exits 0 when the record holds up, 1 when it does not:
+
+  ```json
+  {"ok": true, "game": "sudoku", "seed": 651828, "settings": {"difficulty": "expert"},
+   "won": true, "time": 2545, "score": null, "moves": 260, "version": "1.7.0", "reason": ""}
+  ```
+
+  `ok` is false (with a short `reason`) for a record without a seed, an illegal move, a log that does not end in
+  the claimed result, or a time below what the moves need (at least 0.3 s per move). `time` is the clock of the
+  last move in the log; `score` is recomputed. `--verify` never writes any file, never opens a UI, never checks
+  for updates and never touches the network, and finishes within a few seconds. It is run by the server in a
+  container without network, so the record is the only input.
 
 ## Identity without passwords (phase 2)
 

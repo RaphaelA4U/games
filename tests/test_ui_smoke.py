@@ -243,3 +243,95 @@ async def test_friends_go_online_accept_and_add(fake_home):
         await pilot.press(*"bert#0001", "enter")
         await app.workers.wait_for_complete()
         assert fake.calls[-1] == ("add", "bert#0001")
+
+
+class FakeOnlineBoard(FakeOnline):
+    def __init__(self):
+        super().__init__()
+        self.account = {"id": "a" * 16, "handle": "anna#1234", "devices": []}
+        self.state["incoming"] = []
+        self.state["friends"] = [{"id": "b" * 16, "handle": "kyle#0042", "last_played": {"game": "sudoku"}}]
+        self.boards = []
+
+    def leaderboard(self, game, settings, seed=None, scope="friends"):
+        self.boards.append((game, dict(settings), seed, scope))
+        return {"rows": [{"rank": 1, "id": "b" * 16, "handle": "kyle#0042", "value": 480, "games": 2, "me": False,
+                          "metric": "time"},
+                         {"rank": 2, "id": "a" * 16, "handle": "anna#1234", "value": 600, "games": 1, "me": True,
+                          "metric": "time"}]}
+
+    def challenges(self):
+        return [{"id": 3, "game": "sudoku", "seed": 77, "settings": {"difficulty": "master"}, "kind": "race",
+                 "from": "kyle#0042", "mine": False, "target": None,
+                 "players": [{"handle": "kyle#0042", "status": "accepted", "me": False, "value": 900},
+                             {"handle": "anna#1234", "status": "invited", "me": True, "value": None}]}]
+
+    def answer_challenge(self, cid, accept):
+        self.calls.append(("challenge", cid, accept))
+        return {"ok": True}
+
+    def challenge(self, to, game, settings, seed=None, kind="race", result_id=None):
+        self.calls.append(("send", tuple(to), game, seed, kind, result_id))
+        return {"id": 9, "seed": seed}
+
+
+@pytest.mark.asyncio
+async def test_leaderboard_filters_and_shows_ranks(fake_home):
+    from games_app.ui.app import LeaderboardScreen, RowList
+
+    fake = FakeOnlineBoard()
+    app = GamesApp(no_update=True, boot=False, runner=lambda c, e, p: 0)
+    async with app.run_test(size=SIZE) as pilot:
+        await library(pilot, app)
+        app.push_screen(LeaderboardScreen(load_registry_games(), "sudoku", online=fake))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        rows = [r.plain for r in app.screen.query_one(RowList).rows]
+        assert "kyle#0042" in rows[-2] and "8:00" in rows[-2] and "anna#1234" in rows[-1]
+        assert fake.boards[-1] == ("sudoku", {"difficulty": "hard"}, None, "friends")
+        await pilot.press("down", "right")  # difficulty hard -> expert
+        await app.workers.wait_for_complete()
+        await pilot.press("down", "right")  # friends -> everyone
+        await app.workers.wait_for_complete()
+        await pilot.press("4", "2")  # one seed
+        await app.workers.wait_for_complete()
+        assert fake.boards[-1] == ("sudoku", {"difficulty": "expert"}, 42, "all")
+
+
+def load_registry_games():
+    from games_app.library import load_registry
+
+    return load_registry()
+
+
+@pytest.mark.asyncio
+async def test_challenge_accept_plays_the_same_seed_and_friend_race(fake_home):
+    from games_app.ui.app import ChallengesScreen, FriendsScreen, SeedScreen
+
+    fake_install(fake_home, "sudoku", "1.7.0")
+    fake = FakeOnlineBoard()
+    ran = []
+    app = GamesApp(no_update=True, boot=False, runner=lambda c, e, p: ran.append(c) or 0)
+    async with app.run_test(size=SIZE) as pilot:
+        await library(pilot, app)
+        app.push_screen(ChallengesScreen(load_registry_games(), online=fake))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        assert ("challenge", 3, True) in fake.calls
+        assert ran[-1][1:] == ["--seed", "77", "--difficulty", "master"]
+        await pilot.press("escape")
+        # Friends: c on a friend opens a race with that friend.
+        app.push_screen(FriendsScreen(online=fake))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, SeedScreen) and app.screen.challenge_to[0]["handle"] == "kyle#0042"
+        seed = app.screen.seed
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.calls[-1] == ("send", ("b" * 16,), "sudoku", seed, "race", None)
+        assert ran[-1][1:3] == ["--seed", str(seed)]

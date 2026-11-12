@@ -60,6 +60,8 @@ The library and every game update themselves when they start, like Claude Code.
 
 `f` in the library: pick a name and add friends by their handle. There is no
 password and no email: the device keeps its own key and signs every request.
+`l` shows leaderboards and `c` challenges (a race on the same seed, or "beat my
+time"); only games the server replayed with the game's own `--verify` count.
 How it works and what the server may and may not do: `docs/ONLINE.md`.
 
 ## The registry

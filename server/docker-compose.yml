@@ -1,7 +1,9 @@
 # games.rustema.app: Apache on the host proxies to 127.0.0.1:14050. Nothing else is published.
 services:
   games-server:
-    build: .
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     image: games-server:local
     container_name: games-server
     restart: unless-stopped
@@ -10,7 +12,7 @@ services:
     environment:
       # Our own proxies: the docker gateway (Apache on the host) plus what the
       # host's proxy chain adds; set the rest in .env (never committed).
-      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-172.30.40.1,127.0.0.1}"
+      TRUSTED_PROXIES: "${GAMES_GATEWAY:-172.30.40.1},127.0.0.1"
       BEHEER_MELDING_URL: "${BEHEER_MELDING_URL:-}"
       BEHEER_MELDING_TOKEN: "${BEHEER_MELDING_TOKEN:-}"
     volumes:
@@ -29,9 +31,34 @@ services:
       options: {max-size: "10m", max-file: "3"}
     networks: [games]
 
+  # Replays uploaded results with each game's own --verify. NO network at all: the record is its only input.
+  games-verifier:
+    image: games-server:local
+    container_name: games-verifier
+    restart: unless-stopped
+    command: ["python", "-m", "games_server.verifier"]
+    healthcheck:
+      disable: true
+    network_mode: none
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    user: "10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    pids_limit: 128
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    depends_on: [games-server]
+
 networks:
   games:
     ipam:
       config:
-        - subnet: 172.30.40.0/24
-          gateway: 172.30.40.1
+        - subnet: ${GAMES_SUBNET:-172.30.40.0/24}
+          gateway: ${GAMES_GATEWAY:-172.30.40.1}
