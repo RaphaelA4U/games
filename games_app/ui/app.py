@@ -509,7 +509,7 @@ class LibraryScreen(Screen):
         self.query_one("#details", Static).update("\n".join(lines))
 
     def note(self, text: str) -> None:
-        self.query_one("#lib-note", Static).update(f" {text}")
+        self.query_one("#lib-note", Static).update(text)
 
     # -- actions ---------------------------------------------------------
     def action_move(self, dx: int, dy: int) -> None:
@@ -734,7 +734,7 @@ class HistoryScreen(Screen):
                   if rows else "No games played yet. Play one from the shelf and it shows up here.")
 
     def note(self, text: str) -> None:
-        self.query_one("#lib-note", Static).update(f" {text}")
+        self.query_one("#lib-note", Static).update(text)
 
     def action_move(self, step: int) -> None:
         self.query_one(RowList).move(step)
@@ -833,7 +833,7 @@ class SeedScreen(Screen):
         self.query_one(RowList).set_rows(out)
 
     def note(self, text: str) -> None:
-        self.query_one("#lib-note", Static).update(f" {text}")
+        self.query_one("#lib-note", Static).update(text)
 
     def _key(self) -> str:
         return self._rows()[self.query_one(RowList).selected][0]
@@ -939,7 +939,7 @@ class FriendsScreen(Screen):
         self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "FRIENDS"))
 
     def note(self, text: str) -> None:
-        self.query_one("#lib-note", Static).update(f" {text}")
+        self.query_one("#lib-note", Static).update(text)
 
     # -- talking to the server (in a thread, the screen stays usable) -----
     @work(thread=True, exclusive=True, group="online")
@@ -1107,7 +1107,7 @@ class GamesApp(App):
     RowList { height: 1fr; margin-top: 1; }
     Shelf { width: 1fr; height: auto; margin-top: 2; }
     #details { height: auto; margin-top: 1; }
-    #lib-note { height: 1fr; content-align: left bottom; }
+    #lib-note { height: 1fr; content-align: left bottom; padding: 0 1; }
     #lib-footer { height: 1; color: ansi_bright_black; }
     #page-title { height: 1; text-style: bold; }
     #page-scroll {
