@@ -90,3 +90,88 @@ def test_cartridge_lines_are_all_the_same_width():
     draw_cart(cv, 0, 0, load_registry()[0], "v1.0.0", selected=True, hovered=False)
     rows = cv.to_text().plain.splitlines()
     assert all(len(r.rstrip()) == CART_W for r in rows), rows
+
+
+def _write_history(home):
+    import json
+
+    d = home / ".config" / "sudoku"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "games.jsonl").write_text(
+        json.dumps({"won": True, "difficulty": "expert", "time": 2545, "seed": 651828,
+                    "date": "2026-11-11T14:38:42", "log": []}) + "\n"
+        + json.dumps({"won": False, "difficulty": "hard", "time": 60, "seed": 48024,
+                      "date": "2026-11-10T10:00:00", "log": []}) + "\n")
+    s = home / ".config" / "solitaire"
+    s.mkdir(parents=True, exist_ok=True)
+    (s / "games.jsonl").write_text(json.dumps(
+        {"won": True, "draw": 3, "scoring": "vegas", "score": 52, "time": 300, "seed": 7,
+         "date": "2026-11-12T09:00:00", "log": []}) + "\n" + "not json\n")
+
+
+@pytest.mark.asyncio
+async def test_history_lists_every_game_and_plays_the_same_seed_again(fake_home):
+    from games_app.ui.app import HistoryScreen, RowList
+
+    fake_install(fake_home, "sudoku", "1.6.0")
+    fake_install(fake_home, "solitaire", "1.6.0")
+    _write_history(fake_home)
+    ran = []
+    app = GamesApp(no_update=True, boot=False, runner=lambda c, e, p: ran.append(c) or 0)
+    async with app.run_test(size=SIZE) as pilot:
+        await library(pilot, app)
+        await pilot.press("h")
+        await pilot.pause()
+        assert isinstance(app.screen, HistoryScreen)
+        rows = [r.plain for r in app.screen.query_one(RowList).rows]
+        assert len(rows) == 3 and "Solitaire" in rows[0] and "#7" in rows[0]  # newest first
+        assert "#651828" in rows[1] and "expert" in rows[1] and "won, 42:25" in rows[1]
+        await pilot.press("down", "enter")
+        assert ran[-1][1:] == ["--seed", "651828", "--difficulty", "expert"]
+        await pilot.press("up", "enter")
+        assert ran[-1][1:] == ["--seed", "7", "--draw", "3", "--scoring", "vegas"]
+        await pilot.press("escape")
+        assert isinstance(app.screen, LibraryScreen)
+
+
+@pytest.mark.asyncio
+async def test_play_a_seed_with_settings(fake_home):
+    from games_app.ui.app import SeedScreen
+
+    fake_install(fake_home, "sudoku", "1.6.0")
+    ran = []
+    app = GamesApp(no_update=True, boot=False, runner=lambda c, e, p: ran.append(c) or 0)
+    async with app.run_test(size=SIZE) as pilot:
+        screen = await library(pilot, app)
+        await pilot.press("3", "s")  # sudoku selected on the shelf
+        await pilot.pause()
+        assert isinstance(app.screen, SeedScreen) and app.screen.game["id"] == "sudoku"
+        await pilot.press("down", "4", "2")  # the seed row: typing starts a new number
+        assert app.screen.seed == 42
+        await pilot.press("backspace", "7")
+        assert app.screen.seed == 47
+        await pilot.press("down", "right", "right")  # difficulty hard -> expert -> master
+        await pilot.press("enter")
+        assert ran[-1][1:] == ["--seed", "47", "--difficulty", "master"]
+        await pilot.press("up", "up", "right")  # the game row: next game, its own defaults
+        assert app.screen.game["id"] == "yahtzee" and app.screen.settings["rules"] == "official"
+
+
+def test_history_survives_odd_lines_and_unseeded_games(fake_home):
+    import json
+
+    from games_app.library import history, play_args, load_registry
+
+    _write_history(fake_home)
+    y = fake_home / ".config" / "yahtzee"
+    y.mkdir(parents=True)
+    (y / "games.jsonl").write_text(json.dumps({"won": True, "your_score": 250, "seed": None,
+                                               "rules": "official", "date": "2026-11-01T10:00:00"}) + "\n")
+    played = history()
+    assert [p.game for p in played] == ["solitaire", "sudoku", "sudoku", "yahtzee"]
+    assert played[-1].seed is None and played[-1].score == 250
+    games = {g["id"]: g for g in load_registry()}
+    with pytest.raises(ValueError):
+        play_args(games["sudoku"], 0, {})
+    # Unknown setting values fall back to the default instead of reaching the game.
+    assert play_args(games["sudoku"], 5, {"difficulty": "; rm -rf /"}) == ["--seed", "5", "--difficulty", "hard"]

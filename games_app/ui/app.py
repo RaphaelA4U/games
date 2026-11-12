@@ -32,9 +32,14 @@ from textual.widgets import Static
 
 from .. import __version__
 from ..library import (
+    Played,
     ago,
+    default_settings,
     game_command,
     game_stats,
+    history,
+    play_args,
+    played_result,
     install_command,
     install_env,
     installed_version,
@@ -212,6 +217,9 @@ HELP_TEXT = f"""[b]GAMES v{__version__}[/b]  [dim]all terminal games in one plac
   [b]arrows[/b]     pick a game          [b]1-9[/b]  pick game 1-9
   [b]enter[/b]      play (installs it first if needed)
   [b]u[/b]          install or update the game
+  [b]h[/b]          history: every game you played, of every game; enter
+             plays the same seed with the same settings again
+  [b]s[/b]          play a seed: pick a game, a number and the settings
   [b]?[/b]          this help            [b]q[/b]    quit
 
 [b u]Each game on its own[/b u]
@@ -389,6 +397,8 @@ class Shelf(Widget, can_focus=True):
 FOOTER = [
     ("arrows pick", None),
     ("enter play", "play"),
+    ("h history", "history"),
+    ("s play a seed", "seed"),
     ("u install/update", "update"),
     ("? help", "help"),
     ("q quit", "quit"),
@@ -403,6 +413,8 @@ class LibraryScreen(Screen):
         Binding("down", "move(0, 1)", show=False),
         Binding("enter,space", "play", show=False),
         Binding("u", "update", show=False),
+        Binding("h", "history", show=False),
+        Binding("s", "seed", show=False),
         Binding("question_mark,f1", "help", show=False),
         Binding("q,escape,ctrl+q", "quit_app", show=False),
     ]
@@ -517,23 +529,18 @@ class LibraryScreen(Screen):
 
     def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
         {"play": self.action_play, "update": self.action_update, "help": self.action_help,
+         "history": self.action_history, "seed": self.action_seed,
          "quit": self.action_quit_app}.get(event.action, lambda: None)()
+
+    def action_history(self) -> None:
+        self.app.push_screen(HistoryScreen(self.games))
+
+    def action_seed(self) -> None:
+        self.app.push_screen(SeedScreen(self.games, self.games[self.shelf.selected]["id"]))
 
     def action_play(self) -> None:
         game = self.games[self.shelf.selected]
-        app = self.app
-        assert isinstance(app, GamesApp)
-        if not game_command(game):
-            if app.run_external(install_command(game), install_env(game), pause=True) != 0:
-                self.note(f"[red]{game['name']} did not install.[/] Check your internet and try again.")
-                self.refresh_states()
-                return
-        cmd = game_command(game)
-        if not cmd:
-            self.note(f"[red]{game['name']} is not available.[/]")
-            return
-        app.run_external([cmd], dict(os.environ), pause=False)
-        self.note(f"Back from {game['name']}. Pick the next one.")
+        self.note(launch(self.app, game))
         self.refresh_states()
 
     def action_update(self) -> None:
@@ -553,6 +560,335 @@ class LibraryScreen(Screen):
         self.app.exit()
 
 
+def launch(app: App, game: dict, args: Optional[list[str]] = None) -> str:
+    """Install the game if needed, play it (with these arguments) and say how it went."""
+    assert isinstance(app, GamesApp)
+    if not game_command(game):
+        if app.run_external(install_command(game), install_env(game), pause=True) != 0:
+            return f"[red]{game['name']} did not install.[/] Check your internet and try again."
+    cmd = game_command(game)
+    if not cmd:
+        return f"[red]{game['name']} is not available.[/]"
+    app.run_external([cmd, *(args or [])], dict(os.environ), pause=False)
+    return f"Back from {game['name']}. Pick the next one."
+
+
+def _title_bar(width: int, title: str) -> Text:
+    right = f" v{__version__} "
+    bar = Text()
+    bar.append("+-", style="dim")
+    bar.append(f" {title} ", style=f"bold {ACCENT}")
+    bar.append("-" * max(1, width - len(title) - len(right) - 6), style="dim")
+    bar.append(right, style="dim")
+    bar.append("-+", style="dim")
+    return bar
+
+
+def _clean(value: object) -> str:
+    """Text from a file or (later) the server, safe to show: no control characters."""
+    return "".join(ch for ch in str(value) if ch.isprintable())
+
+
+class RowList(Widget, can_focus=True):
+    """Rows of text; the selected one is purple with a marker. Mouse hovers and
+    clicks, a double click (or enter on the screen) picks it."""
+
+    selected: reactive[int] = reactive(0)
+    hovered: reactive[Optional[int]] = reactive(None)
+
+    class Picked(Message):
+        def __init__(self, index: int) -> None:
+            self.index = index
+            super().__init__()
+
+    def __init__(self, id: Optional[str] = None) -> None:
+        super().__init__(id=id)
+        self.rows: list[Text] = []
+        self.header: Optional[str] = None
+        self.top = 0
+        self._last_click = (-1, 0.0)
+
+    def set_rows(self, rows: list[Text], header: Optional[str] = None) -> None:
+        self.rows, self.header = rows, header
+        self.selected = min(self.selected, max(0, len(rows) - 1))
+        self.refresh()
+
+    def _visible(self) -> int:
+        return max(1, self.size.height - (1 if self.header else 0))
+
+    def render(self) -> Text:
+        out = Text(no_wrap=True, overflow="crop")
+        if self.header:
+            out.append(self.header + "\n", style="dim")
+        n = self._visible()
+        if self.selected < self.top:
+            self.top = self.selected
+        elif self.selected >= self.top + n:
+            self.top = self.selected - n + 1
+        for i in range(self.top, min(len(self.rows), self.top + n)):
+            row = self.rows[i]
+            if i == self.selected:
+                line = Text("> ", style=f"bold {ACCENT}")
+                line.append_text(row.copy())
+                line.stylize(f"bold {ACCENT}", 2)
+            else:
+                line = Text("  ")
+                line.append_text(row)
+                if i == self.hovered:
+                    line.stylize("bold")
+            out.append_text(line)
+            out.append("\n")
+        return out
+
+    def move(self, step: int) -> None:
+        if self.rows:
+            self.selected = max(0, min(len(self.rows) - 1, self.selected + step))
+            self.refresh()
+
+    def _row_at(self, y: int) -> Optional[int]:
+        i = self.top + y - (1 if self.header else 0)
+        return i if 0 <= i < len(self.rows) and y >= (1 if self.header else 0) else None
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        self.hovered = self._row_at(event.y)
+        self.refresh()
+
+    def on_leave(self) -> None:
+        self.hovered = None
+        self.refresh()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        self.move(3)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self.move(-3)
+
+    def on_click(self, event: events.Click) -> None:
+        i = self._row_at(event.y)
+        if i is None:
+            return
+        now = time.monotonic()
+        double = self._last_click[0] == i and now - self._last_click[1] < 0.5
+        self._last_click = (i, now)
+        self.selected = i
+        self.refresh()
+        self.post_message(self.Picked(i) if double or event.chain >= 2 else self.Picked(-1 - i))
+
+
+HISTORY_FOOTER = [("arrows pick", None), ("enter play it again", "play"), ("esc back", "back")]
+
+
+class HistoryScreen(Screen):
+    """Every game you played, of every game, newest first. Enter plays the same
+    seed with the same settings again."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("pageup", "move(-10)", show=False), Binding("pagedown", "move(10)", show=False),
+        Binding("home", "move(-100000)", show=False), Binding("end", "move(100000)", show=False),
+        Binding("enter,space", "play", show=False),
+        Binding("escape,q,backspace,h", "go_back", show=False),
+    ]
+
+    def __init__(self, games: list[dict]) -> None:
+        super().__init__()
+        self.games = {g["id"]: g for g in games}
+        self.played: list[Played] = []
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar(HISTORY_FOOTER, id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.load()
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "HISTORY"))
+
+    def load(self) -> None:
+        self.played = history(list(self.games.values()))
+        rows = []
+        for p in self.played:
+            name = self.games[p.game]["name"] if p.game in self.games else p.game
+            when = p.date.strftime("%Y-%m-%d %H:%M") if p.date else "?"
+            seed = f"#{p.seed}" if p.seed is not None else "-"
+            labels = {x["id"]: x["label"].lower() for x in (self.games.get(p.game, {}).get("play") or {}).get("settings", [])}
+            settings = " ".join(f"{labels.get(k, k)} {_clean(v)}" if str(v).isdigit() else _clean(v)
+                                for k, v in p.settings.items())
+            row = Text(f"{when}  {name:<10} {seed:<8} {settings:<22} ")
+            row.append(played_result(p), style=WINC if p.won else "")
+            rows.append(row)
+        header = f"  {'played':<16}  {'game':<10} {'seed':<8} {'settings':<22} result"
+        self.query_one(RowList).set_rows(rows, header if rows else None)
+        self.note(f"{len(rows)} games. Enter plays the same seed with the same settings again."
+                  if rows else "No games played yet. Play one from the shelf and it shows up here.")
+
+    def note(self, text: str) -> None:
+        self.query_one("#lib-note", Static).update(f" {text}")
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    @on(RowList.Picked)
+    def _picked(self, event: RowList.Picked) -> None:
+        if event.index >= 0:
+            self.action_play()
+
+    def action_play(self) -> None:
+        if not self.played:
+            return
+        p = self.played[self.query_one(RowList).selected]
+        game = self.games.get(p.game)
+        if game is None:
+            return
+        if p.seed is None:
+            self.note("That game had no seed (a random one), so it cannot be played again exactly.")
+            return
+        self.note(launch(self.app, game, play_args(game, p.seed, p.settings)))
+        self.load()
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        {"play": self.action_play, "back": self.action_go_back}.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
+SEED_FOOTER = [("arrows pick/change", None), ("0-9 type a seed", None), ("r random", "random"),
+               ("enter play", "play"), ("esc back", "back")]
+
+
+class SeedScreen(Screen):
+    """Play a game by its number: the same seed and settings are the same game
+    for everyone, so you can send it to a friend."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", show=False), Binding("down", "move(1)", show=False),
+        Binding("left", "change(-1)", show=False), Binding("right", "change(1)", show=False),
+        Binding("enter", "play", show=False), Binding("r", "random", show=False),
+        Binding("escape,q", "go_back", show=False),
+    ]
+
+    def __init__(self, games: list[dict], game_id: str) -> None:
+        super().__init__()
+        self.games = [g for g in games if g.get("play")]
+        self.game_i = next((i for i, g in enumerate(self.games) if g["id"] == game_id), 0)
+        self.settings = default_settings(self.games[self.game_i])
+        self.seed: Optional[int] = self._random_seed()
+        self._typing = False
+
+    def _random_seed(self) -> int:
+        import random
+
+        return random.SystemRandom().randint(1, int(self.game["play"].get("seed_max", 999999)))
+
+    @property
+    def game(self) -> dict:
+        return self.games[self.game_i]
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="lib-title")
+        yield RowList(id="rows")
+        yield Static("", id="lib-note", markup=True)
+        yield ActionBar(SEED_FOOTER, id="lib-footer")
+
+    def on_mount(self) -> None:
+        self.query_one(RowList).focus()
+        self.draw()
+        self.note("Same seed and settings = the same game for everyone. Send the seed to a friend.")
+
+    def on_resize(self) -> None:
+        self.query_one("#lib-title", Static).update(_title_bar(self.size.width or 80, "PLAY A SEED"))
+
+    def _rows(self) -> list[tuple[str, str, bool]]:
+        rows = [("game", "Game", True), ("seed", "Seed", False)]
+        rows += [(s["id"], s["label"], True) for s in self.game["play"].get("settings", [])]
+        return rows + [("play", "", False)]
+
+    def draw(self) -> None:
+        out = []
+        for key, label, choice in self._rows():
+            if key == "play":
+                row = Text("Play", style="bold")
+                row.append(f"   {self.game['id']} " + " ".join(play_args(self.game, self.seed, self.settings)),
+                           style="dim")
+            else:
+                value = (self.game["name"] if key == "game" else
+                         (str(self.seed) if self.seed else "_") if key == "seed" else self.settings[key])
+                row = Text(f"{label:<12}")
+                row.append("< " if choice else "  ", style="dim")
+                row.append(value, style="bold")
+                row.append(" >" if choice else "  (type digits, r = random)", style="dim")
+            out.append(row)
+        self.query_one(RowList).set_rows(out)
+
+    def note(self, text: str) -> None:
+        self.query_one("#lib-note", Static).update(f" {text}")
+
+    def _key(self) -> str:
+        return self._rows()[self.query_one(RowList).selected][0]
+
+    def action_move(self, step: int) -> None:
+        self.query_one(RowList).move(step)
+
+    def action_change(self, step: int) -> None:
+        key = self._key()
+        if key == "game":
+            self.game_i = (self.game_i + step) % len(self.games)
+            self.settings = default_settings(self.game)
+        elif key not in ("seed", "play"):
+            spec = next(s for s in self.game["play"]["settings"] if s["id"] == key)
+            choices = [str(c) for c in spec["choices"]]
+            self.settings[key] = choices[(choices.index(self.settings[key]) + step) % len(choices)]
+        self.draw()
+
+    def action_random(self) -> None:
+        self.seed = self._random_seed()
+        self._typing = False
+        self.draw()
+
+    async def on_key(self, event: events.Key) -> None:
+        ch = event.character
+        if ch and ch.isdigit() and len(ch) == 1:
+            event.stop()
+            # The first digit starts a new number instead of adding to the random one.
+            new = int(f"{self.seed or ''}{ch}" if self._typing else ch)
+            self._typing = True
+            if new <= int(self.game["play"].get("seed_max", 999999)):
+                self.seed = new or None
+            self.draw()
+        elif event.key == "backspace":
+            event.stop()
+            digits = str(self.seed or "")[:-1]
+            self.seed = int(digits) if digits else None
+            self.draw()
+
+    @on(RowList.Picked)
+    def _picked(self, event: RowList.Picked) -> None:
+        # A click on the play row plays; a click on a setting turns it to the next value.
+        key = self._key()
+        if key == "play":
+            self.action_play()
+        elif key != "seed" and event.index < 0:
+            self.action_change(1)
+
+    def action_play(self) -> None:
+        if not self.seed:
+            self.note("[red]Type a seed first[/] (or r for a random one).")
+            return
+        self.note(launch(self.app, self.game, play_args(self.game, self.seed, self.settings)))
+
+    def on_action_bar_invoked(self, event: ActionBar.Invoked) -> None:
+        {"play": self.action_play, "random": self.action_random,
+         "back": self.action_go_back}.get(event.action, lambda: None)()
+
+    def action_go_back(self) -> None:
+        self.app.pop_screen()
+
+
 class GamesApp(App):
     TITLE = f"Games v{__version__}"
 
@@ -560,6 +896,7 @@ class GamesApp(App):
     Screen { background: ansi_default; color: ansi_default; }
     #boot { width: 1fr; height: 1fr; }
     #lib-title { height: 1; }
+    RowList { height: 1fr; margin-top: 1; }
     Shelf { width: 1fr; height: auto; margin-top: 2; }
     #details { height: auto; margin-top: 1; }
     #lib-note { height: 1fr; content-align: left bottom; }

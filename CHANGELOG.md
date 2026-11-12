@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0 (2026-11-12)
+- History (`h`): every game you played, of every game, newest first, with its seed, settings and result. Enter plays the same seed with the same settings again.
+- Play a seed (`s`): pick a game, type a number (or `r` for a random one) and choose the settings. The same seed and settings are the same game for everyone.
+- Every game in the registry has a `play` block (seed flag, settings, history file), the contract for friends, leaderboards and battles later (`docs/ONLINE.md`).
+
 ## v1.1.2 (2026-11-11)
 - The sudoku description says six difficulties (beginner to master), as in sudoku v1.4.0.
 

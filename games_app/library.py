@@ -180,3 +180,88 @@ def list_games() -> list[dict[str, Any]]:
         entry["version"] = installed_version(game)
         out.append(entry)
     return out
+
+
+# -- playing a seed and the history of every game (docs/ONLINE.md, phase 1) ------
+
+@dataclass
+class Played:
+    """One game from a game's games.jsonl, in the same shape for every game."""
+    game: str
+    date: Optional[datetime]
+    seed: Optional[int]
+    settings: dict
+    won: bool
+    time: Optional[int] = None
+    score: Optional[int] = None
+
+
+def default_settings(game: dict[str, Any]) -> dict[str, str]:
+    return {s["id"]: str(s["default"]) for s in (game.get("play") or {}).get("settings", [])}
+
+
+def play_args(game: dict[str, Any], seed: Optional[int], settings: dict[str, Any]) -> list[str]:
+    """The arguments that start exactly this game: the seed plus every setting
+    (missing or unknown values fall back to the default)."""
+    play = game.get("play") or {}
+    args: list[str] = []
+    if seed is not None:
+        seed = int(seed)
+        if not 1 <= seed <= int(play.get("seed_max", 999999)):
+            raise ValueError(f"seed must be 1-{play.get('seed_max', 999999)}")
+        args += [play.get("seed_flag", "--seed"), str(seed)]
+    for s in play.get("settings", []):
+        value = str(settings.get(s["id"], s["default"]))
+        if value not in [str(c) for c in s["choices"]]:
+            value = str(s["default"])
+        args += [s["flag"], value]
+    return args + [str(a) for a in play.get("extra_args", [])]
+
+
+def history(games: Optional[list[dict[str, Any]]] = None, limit: int = 500) -> list[Played]:
+    """Every recorded game of every game, newest first."""
+    out: list[Played] = []
+    for game in games if games is not None else load_registry():
+        play = game.get("play") or {}
+        if not play.get("history"):
+            continue
+        path = Path.home() / ".config" / game["id"] / play["history"]
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        result = play.get("result") or {}
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            try:
+                date = datetime.fromisoformat(str(rec.get("date")))
+            except ValueError:
+                date = None
+            seed = rec.get("seed")
+            settings = {s["id"]: str(rec[s["id"]]) for s in play.get("settings", [])
+                        if rec.get(s["id"]) is not None}
+
+            def num(key: Optional[str]) -> Optional[int]:
+                value = rec.get(key) if key else None
+                return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+            out.append(Played(game=game["id"], date=date,
+                              seed=int(seed) if isinstance(seed, int) else None,
+                              settings=settings, won=bool(rec.get("won")),
+                              time=num(result.get("time")), score=num(result.get("score"))))
+    out.sort(key=lambda p: p.date or datetime.min, reverse=True)
+    return out[:limit]
+
+
+def played_result(p: Played) -> str:
+    parts = ["won" if p.won else "lost"]
+    if p.time is not None:
+        parts.append(_fmt_time(p.time))
+    if p.score is not None:
+        parts.append(f"{p.score} pts")
+    return ", ".join(parts)

@@ -42,6 +42,8 @@ uses each game's own installer, so both routes end up in the same place
 | arrows / 1-9 | pick a game |
 | enter (or double-click) | play; installs it first if needed |
 | u | install or update the game |
+| h | history: every game you played, of every game; enter plays the same seed again |
+| s | play a seed: a game, a number and its settings (the same for everyone) |
 | ? | help |
 | q | quit |
 
@@ -67,8 +69,13 @@ there says how a chat battle runs:
   solitaire and sudoku. The game tags its save and stats with the battle id and
   writes a `progress` count; beheer compares the players.
 
-Adding a game = a new repo made the same way, its entry in the registry, and
-(for chat battles) the `--battle` or `--host/--join` flags in the game.
+Every game also has a `play` block: its `--seed` flag, the settings that make
+two games the same game, and its history file (`games.jsonl`). The library
+uses it for the history and "play a seed"; see `docs/ONLINE.md` for the full
+contract and the plans for friends, leaderboards and battles.
+
+Adding a game = a new repo made the same way, its entry in the registry (with
+`play`), and (for chat battles) the `--battle` or `--host/--join` flags in the game.
 
 ## The games host (BM Beheer)
 
